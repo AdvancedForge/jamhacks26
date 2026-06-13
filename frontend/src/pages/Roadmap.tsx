@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../hackbuddyApi";
 import type { Task, ToastFn } from "../hackbuddyTypes";
-import { COLUMNS } from "../components/BoardUI";
 
 const COL_COLOR: Record<string, string> = { Backlog: "#71717a", "In Progress": "#f59e0b", Done: "#22c55e" };
 
