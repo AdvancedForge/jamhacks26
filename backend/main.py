@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import string
 import time
 import traceback
@@ -42,6 +43,7 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 client = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
 db = client.hackbuddy
 mock_whiteboards: Dict[str, Dict[str, Any]] = {}
+mock_whiteboard_jobs: Dict[str, Dict[str, Any]] = {}
 
 
 # Helper to check if DB is connected
@@ -71,6 +73,11 @@ class WhiteboardScenePayload(BaseModel):
     scene: Dict[str, Any] = Field(default_factory=dict)
     base_version: Optional[int] = None
     actor_id: Optional[str] = None
+
+
+class WhiteboardGeneratePayload(BaseModel):
+    image_base64: str
+    framework: Optional[str] = "react"
 
 
 def _to_int(value: Any) -> int:
@@ -248,6 +255,146 @@ def _summarize_whiteboard_scene(scene: Any) -> str:
     )
 
 
+def _decode_image_payload(
+    image_base64: Any, fallback_mime_type: str = "image/png"
+) -> tuple[bytes, str]:
+    if not isinstance(image_base64, str) or not image_base64.strip():
+        raise ValueError("Missing image_base64")
+
+    payload = image_base64.strip()
+    mime_type = fallback_mime_type
+    base64_body = payload
+
+    if payload.startswith("data:"):
+        header, separator, body = payload.partition(",")
+        if not separator or not body.strip():
+            raise ValueError("Invalid data URL for image_base64")
+        base64_body = body.strip()
+        header_match = re.match(
+            r"^data:(?P<mime>[-\w.+/]+);base64$", header.strip(), re.IGNORECASE
+        )
+        if header_match:
+            mime_type = header_match.group("mime")
+
+    normalized_base64 = re.sub(r"\s+", "", base64_body)
+    padding = "=" * (-len(normalized_base64) % 4)
+    try:
+        decoded = base64.b64decode(normalized_base64 + padding)
+    except Exception as error:
+        raise ValueError("Invalid base64 image payload") from error
+
+    if not decoded:
+        raise ValueError("Image payload was empty after decoding")
+
+    return decoded, mime_type
+
+
+def _strip_markdown_code_fences(raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        text = re.sub(r"^```[A-Za-z0-9_.+-]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    return text.strip()
+
+
+def _normalize_framework_name(framework: Optional[str]) -> str:
+    candidate = (framework or "react").strip().lower()
+    if not candidate:
+        return "react"
+    if not re.fullmatch(r"[a-z0-9._-]{2,24}", candidate):
+        return "react"
+    return candidate
+
+
+def _build_whiteboard_generation_prompt(framework: str) -> str:
+    return (
+        f"You are a senior {framework} engineer. Convert this whiteboard image into working starter code.\n"
+        "Focus on the sketched structure, hierarchy, and visible labels. If the image contains symbols "
+        "(like smiley faces, arrows, icons, or notes), preserve that intent as small UI details or comments.\n"
+        "Return only code for a single file with no markdown fences and no extra commentary.\n"
+        "If the sketch is ambiguous, make pragmatic assumptions and include brief TODO comments for unclear parts."
+    )
+
+
+def _new_mock_whiteboard_job_id() -> str:
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    return f"job_wb_{int(time.time() * 1000)}_{suffix}"
+
+
+async def _set_whiteboard_job_state(
+    job_id: str, persist_to_db: bool, **fields: Any
+) -> None:
+    update_fields = {**fields, "updated_at": int(time.time() * 1000)}
+    if persist_to_db:
+        try:
+            await db.whiteboard_jobs.update_one(
+                {"_id": ObjectId(job_id)}, {"$set": update_fields}
+            )
+            return
+        except Exception as error:
+            logger.warning(f"Failed to persist whiteboard job update in DB: {error}")
+
+    if job_id in mock_whiteboard_jobs:
+        mock_whiteboard_jobs[job_id].update(update_fields)
+
+
+async def _run_whiteboard_generation_job(
+    *,
+    job_id: str,
+    room_id: str,
+    framework: str,
+    image_data: bytes,
+    image_mime_type: str,
+    persist_to_db: bool,
+) -> None:
+    try:
+        whiteboard_generation_model, _ = _create_whiteboard_models()
+        response = await whiteboard_generation_model.generate_content_async(
+            [
+                _build_whiteboard_generation_prompt(framework),
+                {"mime_type": image_mime_type, "data": image_data},
+            ]
+        )
+        generated_code = _strip_markdown_code_fences(response.text)
+        if not generated_code:
+            raise ValueError("Model returned empty code output")
+
+        await _set_whiteboard_job_state(
+            job_id,
+            persist_to_db,
+            status="completed",
+            code=generated_code,
+            framework=framework,
+            error=None,
+        )
+        await manager.broadcast(
+            room_id,
+            {
+                "type": "WHITEBOARD_JOB_UPDATED",
+                "job_id": job_id,
+                "status": "completed",
+            },
+        )
+    except Exception as error:
+        logger.error(f"Whiteboard code generation failed for {job_id}: {error}")
+        await _set_whiteboard_job_state(
+            job_id,
+            persist_to_db,
+            status="error",
+            error=str(error),
+        )
+        await manager.broadcast(
+            room_id,
+            {
+                "type": "WHITEBOARD_JOB_UPDATED",
+                "job_id": job_id,
+                "status": "error",
+            },
+        )
+
+
 async def _get_room_whiteboard_scene(
     room_id: str, db_connected: bool
 ) -> Dict[str, Any]:
@@ -363,6 +510,8 @@ class ChatMessage(BaseModel):
     message: str
     client_nonce: Optional[str] = None
     model: Optional[str] = None
+    whiteboard_image_base64: Optional[str] = None
+    whiteboard_image_mime_type: Optional[str] = None
 
 
 import base64
@@ -372,6 +521,7 @@ import google.generativeai as genai
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_GEMINI_MODEL", "gemma-4-31b-it")
+WHITEBOARD_VISION_MODEL = os.getenv("WHITEBOARD_VISION_MODEL", "gemini-2.5-flash")
 SUPPORTED_CHAT_MODELS = [
     "gemma-4-31b-it",
     "gemma-4-26b-a4b-it",
@@ -389,6 +539,21 @@ model = genai.GenerativeModel(DEFAULT_CHAT_MODEL)
 chat_model = genai.GenerativeModel(
     DEFAULT_CHAT_MODEL, system_instruction=(CHAT_SYSTEM_INSTRUCTION)
 )
+
+
+def _create_whiteboard_models() -> tuple[Any, Any]:
+    try:
+        return (
+            genai.GenerativeModel(WHITEBOARD_VISION_MODEL),
+            genai.GenerativeModel(
+                WHITEBOARD_VISION_MODEL, system_instruction=(CHAT_SYSTEM_INSTRUCTION)
+            ),
+        )
+    except Exception as error:
+        logger.warning(
+            f"Could not initialize whiteboard model '{WHITEBOARD_VISION_MODEL}': {error}"
+        )
+        return model, chat_model
 
 
 def _resolve_chat_model_name(model_name: Optional[str]) -> str:
@@ -627,11 +792,14 @@ async def send_chat_message(
     custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
     if custom_key:
         genai.configure(api_key=custom_key)
-    selected_model, intent_model, reply_model = _create_chat_models(
+    selected_model, _intent_model, reply_model = _create_chat_models(
         chat.model or x_gemini_model
     )
     db_connected = await is_db_connected()
-    message_dict = chat.model_dump(exclude_none=True)
+    message_dict = chat.model_dump(
+        exclude_none=True,
+        exclude={"whiteboard_image_base64", "whiteboard_image_mime_type"},
+    )
     message_dict["model"] = selected_model
     message_dict["timestamp"] = datetime.now().isoformat()
 
@@ -652,6 +820,24 @@ async def send_chat_message(
 
     # Unified AI Intent and Reply
     try:
+        whiteboard_image_part: Optional[Dict[str, Any]] = None
+        whiteboard_image_hint = "No whiteboard image attachment was provided."
+        if chat.whiteboard_image_base64:
+            try:
+                image_data, detected_mime_type = _decode_image_payload(
+                    chat.whiteboard_image_base64,
+                    chat.whiteboard_image_mime_type or "image/png",
+                )
+                whiteboard_image_part = {
+                    "mime_type": detected_mime_type,
+                    "data": image_data,
+                }
+                whiteboard_image_hint = (
+                    "A current whiteboard snapshot image is attached. Use it to infer "
+                    "layout structure, visual intent, and symbols (including smiley-like doodles)."
+                )
+            except ValueError as decode_error:
+                logger.warning(f"Skipping invalid whiteboard image payload: {decode_error}")
         # Fetch board data
         board_data = await get_board(chat.room_id)
 
@@ -676,6 +862,7 @@ async def send_chat_message(
             '"roadmap" should contain the updated roadmap markdown content if the user requests changes to it, otherwise omit this field. '
             '"reply" MUST be a direct, relevant answer to the user. '
             "If the user asks a question, answer it based on the provided tasks and roadmap. "
+            "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
             "If the request is unclear, politely ask for clarification. "
             'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
             "Do NOT include any other text, chain-of-thought, or prompt echoes."
@@ -685,13 +872,30 @@ async def send_chat_message(
             f"{prompt}\n\n"
             f"--- Context ---\n"
             f"Whiteboard: {whiteboard_summary}\n"
+            f"Whiteboard image context: {whiteboard_image_hint}\n"
             f"Tasks:\n{tasks_summary}\n"
             f"Roadmap:\n{roadmap_content}\n"
             f"---------------\n"
             f'User message: "{chat.message}"'
         )
+        generation_payload: Any = full_prompt
+        ai_model_used = selected_model
+        if whiteboard_image_part:
+            generation_payload = [full_prompt, whiteboard_image_part]
 
-        response = await reply_model.generate_content_async(full_prompt)
+        try:
+            response = await reply_model.generate_content_async(generation_payload)
+        except Exception as multimodal_error:
+            if not whiteboard_image_part:
+                raise
+            logger.warning(
+                f"Primary chat model could not use whiteboard image, retrying with vision model: {multimodal_error}"
+            )
+            _, whiteboard_reply_model = _create_whiteboard_models()
+            response = await whiteboard_reply_model.generate_content_async(
+                generation_payload
+            )
+            ai_model_used = WHITEBOARD_VISION_MODEL
         result = _extract_json_object(response.text)
 
         # 1. Handle Tasks
@@ -746,7 +950,7 @@ async def send_chat_message(
         "sender": "HackBuddy AI",
         "message": "",
         "timestamp": datetime.now().isoformat(),
-        "model": selected_model,
+        "model": ai_model_used if "ai_model_used" in locals() else selected_model,
     }
 
     await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": False})
@@ -780,15 +984,14 @@ async def send_chat_message(
             "sender": "HackBuddy AI",
             "message": ai_reply,
             "timestamp": final_ai_message["timestamp"],
-            "model": selected_model,
+            "model": final_ai_message["model"],
         }
         await db.chat_messages.insert_one(db_ai_message)
 
     await manager.broadcast(
         chat.room_id, {"type": "CHAT_MESSAGE", "message": final_ai_message}
     )
-
-    return {"ok": True, "saved": db_connected, "model": selected_model}
+    return {"ok": True, "saved": db_connected, "model": final_ai_message["model"]}
 
 
 # --- Kanban Endpoints ---
@@ -1042,42 +1245,107 @@ async def save_whiteboard_scene(room_id: str, payload: WhiteboardScenePayload):
 
 
 @app.post("/api/whiteboard/generate")
-async def generate_whiteboard(room_id: str, data: dict):
-    job = {"room_id": room_id, "status": "processing", "code": None}
-    if await is_db_connected():
+async def generate_whiteboard(
+    room_id: str,
+    data: WhiteboardGeneratePayload,
+    x_gemini_api_key: Optional[str] = Header(None),
+):
+    custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
+    if custom_key:
+        genai.configure(api_key=custom_key)
+    try:
+        image_data, image_mime_type = _decode_image_payload(data.image_base64)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    framework = _normalize_framework_name(data.framework)
+    now = int(time.time() * 1000)
+    job = {
+        "room_id": room_id,
+        "status": "processing",
+        "code": None,
+        "framework": framework,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    db_connected = await is_db_connected()
+    if db_connected:
         result = await db.whiteboard_jobs.insert_one(job)
-        return {"job_id": str(result.inserted_id)}
-    return {"job_id": "job_wb_mock_001"}
+        job_id = str(result.inserted_id)
+    else:
+        job_id = _new_mock_whiteboard_job_id()
+        mock_whiteboard_jobs[job_id] = {**job, "job_id": job_id}
+
+    asyncio.create_task(
+        _run_whiteboard_generation_job(
+            job_id=job_id,
+            room_id=room_id,
+            framework=framework,
+            image_data=image_data,
+            image_mime_type=image_mime_type,
+            persist_to_db=db_connected,
+        )
+    )
+    return {"job_id": job_id}
 
 
 @app.post("/api/whiteboard/analyze")
-async def analyze_whiteboard(room_id: str, data: dict):
-    if not await is_db_connected():
-        return {"ok": False, "error": "Database unavailable"}
+async def analyze_whiteboard(
+    room_id: str,
+    data: dict,
+    x_gemini_api_key: Optional[str] = Header(None),
+):
+    custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
+    if custom_key:
+        genai.configure(api_key=custom_key)
 
     image_b64 = data.get("image_base64")
     if not image_b64:
         raise HTTPException(status_code=400, detail="Missing image_base64")
-
-    # Prepare image for Gemini
-    image_data = base64.b64decode(image_b64.split(",")[1])
+    try:
+        image_data, image_mime_type = _decode_image_payload(image_b64)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
     try:
-        # Use Gemini Vision
-        response = await model.generate_content_async(
+        whiteboard_analysis_model, _ = _create_whiteboard_models()
+        response = await whiteboard_analysis_model.generate_content_async(
             [
-                "Analyze this whiteboard sketch. Provide brief, actionable feedback or suggestions for improvement.",
-                {"mime_type": "image/png", "data": image_data},
+                (
+                    "Analyze this whiteboard sketch image and provide concise implementation guidance. "
+                    "Mention visible layout structure, likely UI components, and any obvious symbols "
+                    "(for example smiley faces, arrows, or icons). Keep it practical and brief."
+                ),
+                {"mime_type": image_mime_type, "data": image_data},
             ]
         )
 
-        feedback = response.text
+        feedback = _strip_markdown_code_fences(response.text)
+        if not feedback:
+            feedback = (
+                "I could not confidently read the sketch. Try adding labels for components "
+                "or a clearer structure, then run feedback again."
+            )
 
-        # Post feedback to chat using the unified chat mechanism
-        chat = ChatMessage(
-            room_id=room_id, sender="AI Whiteboard Assistant", message=feedback
-        )
-        await send_chat_message(chat)
+        db_connected = await is_db_connected()
+        message = {
+            "room_id": room_id,
+            "sender": "AI Whiteboard Assistant",
+            "message": feedback,
+            "timestamp": datetime.now().isoformat(),
+            "model": WHITEBOARD_VISION_MODEL,
+            "is_streaming": False,
+        }
+        if db_connected:
+            result = await db.chat_messages.insert_one(message)
+            message["id"] = str(result.inserted_id)
+            message.pop("_id", None)
+        else:
+            message["id"] = f"temp_ai_wb_{int(time.time() * 1000)}"
+
+        await manager.broadcast(room_id, {"type": "CHAT_MESSAGE", "message": message})
 
         return {"ok": True}
     except Exception as e:
@@ -1087,19 +1355,35 @@ async def analyze_whiteboard(room_id: str, data: dict):
 
 @app.get("/api/whiteboard/{job_id}")
 async def get_whiteboard_job(job_id: str):
-    if await is_db_connected():
-        job = await db.whiteboard_jobs.find_one({"_id": ObjectId(job_id)})
+    db_connected = await is_db_connected()
+    if db_connected:
+        job = None
+        try:
+            job = await db.whiteboard_jobs.find_one({"_id": ObjectId(job_id)})
+        except Exception:
+            job = None
         if job:
             return {
                 "status": job["status"],
                 "code": job.get("code"),
                 "framework": job.get("framework"),
+                "error": job.get("error"),
             }
+    if job_id in mock_whiteboard_jobs:
+        mock_job = mock_whiteboard_jobs[job_id]
+        return {
+            "status": mock_job.get("status", "processing"),
+            "code": mock_job.get("code"),
+            "framework": mock_job.get("framework"),
+            "error": mock_job.get("error"),
+        }
+    if db_connected:
         raise HTTPException(status_code=404, detail="Job not found")
     return {
         "status": "completed",
         "code": "export default function GeneratedLayout() { return <div>Mock Code</div> }",
         "framework": "react",
+        "error": None,
     }
 
 
