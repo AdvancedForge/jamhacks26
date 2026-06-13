@@ -4,7 +4,7 @@ import random
 import string
 import traceback
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -19,21 +19,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Global exception handler to ensure CORS headers are always sent
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}")
-    logger.error(traceback.format_exc())
-    return JSONResponse(
-        status_code=500,
-        content={"detail": str(exc)},
-    )
-
-# --- CORS (Relaxed) ---
 app.add_middleware(
-    CORSMiddleware,
+    FastAPICORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -118,10 +106,21 @@ async def get_board(room_id: str):
             board = {"room_id": room_id, "columns": ["Backlog", "In Progress", "Done"], "tasks": []}
             await db.boards.insert_one(board)
         
-        tasks = await db.tasks.find({"room_id": room_id}).to_list(length=100)
+        tasks = await db.tasks.find({"room_id": room_id, "deleted": {"$ne": True}}).to_list(length=100)
+        clean_tasks = []
         for task in tasks:
-            task["id"] = str(task.pop("_id"))
-        return {"columns": board.get("columns", ["Backlog", "In Progress", "Done"]), "tasks": tasks}
+            clean_task = {
+                "id": str(task.pop("_id")),
+                "title": task.get("title", ""),
+                "description": task.get("description"),
+                "column": task.get("column", "Backlog"),
+                "assignee": task.get("assignee"),
+                "created_at": task.get("created_at"),
+                "updated_at": task.get("updated_at"),
+                "git_linked": task.get("git_linked"),
+            }
+            clean_tasks.append(clean_task)
+        return {"columns": board.get("columns", ["Backlog", "In Progress", "Done"]), "tasks": clean_tasks}
     else:
         # MOCK FALLBACK
         return {
