@@ -1,9 +1,22 @@
-import { useState, useContext } from 'react';
-import { RoomContext } from '../context/RoomContext';
+import { useState } from "react";
 
-export const ChatWindow = ({ messages, onSendMessage }: { messages: any[], onSendMessage: (text: string) => void }) => {
+type ChatMessage = {
+  id?: string;
+  sender: string;
+  message: string;
+  timestamp?: string;
+};
+
+export const ChatWindow = ({
+  roomCode,
+  messages,
+  onSendMessage,
+}: {
+  roomCode: string;
+  messages: ChatMessage[];
+  onSendMessage: (text: string) => void;
+}) => {
   const [input, setInput] = useState('');
-  const { roomCode } = useContext(RoomContext);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,7 +32,7 @@ export const ChatWindow = ({ messages, onSendMessage }: { messages: any[], onSen
       </div>
       <div className="flex-grow overflow-y-auto p-4 space-y-3">
         {messages.map((m, i) => (
-          <div key={i} className="text-sm bg-white/[0.03] p-2 rounded-md">
+          <div key={m.id || `${m.timestamp || ""}-${m.sender}-${i}`} className="text-sm bg-white/[0.03] p-2 rounded-md">
             <span className="font-bold text-blue-400">{m.sender}: </span>
             <span className="text-gray-300">{m.message}</span>
           </div>

@@ -15,6 +15,15 @@ import {
 import { API_BASE, apiFetch } from "../hackbuddyApi";
 import type { Task, ToastFn } from "../hackbuddyTypes";
 import { COLUMNS, Column, DragTaskCardPreview, type CreateTaskInput, TaskDrawer } from "../components/BoardUI";
+import { ChatWindow } from "../components/ChatWindow";
+import { useBoardWebSocket } from "../hooks/useBoardWebSocket";
+
+type ChatMessage = {
+  id?: string;
+  sender: string;
+  message: string;
+  timestamp?: string;
+};
 
 export default function BoardPage({
   roomCode,
@@ -26,7 +35,9 @@ export default function BoardPage({
   onPoll?: () => void;
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [drawer, setDrawer] = useState<Task | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [retries, setRetries] = useState(0);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -72,6 +83,23 @@ export default function BoardPage({
 
     return merged;
   }, []);
+
+  const handleSocketMessage = useCallback((payload: unknown) => {
+    const event = payload as { type?: string; message?: ChatMessage };
+    if (event.type !== "CHAT_MESSAGE" || !event.message) return;
+    const incoming = event.message;
+    setChatMessages((currentMessages) => {
+      const incomingKey = incoming.id || `${incoming.timestamp || ""}|${incoming.sender}|${incoming.message}`;
+      const duplicate = currentMessages.some((message) => {
+        const messageKey = message.id || `${message.timestamp || ""}|${message.sender}|${message.message}`;
+        return messageKey === incomingKey;
+      });
+      if (duplicate) return currentMessages;
+      return [...currentMessages, incoming];
+    });
+  }, []);
+
+  useBoardWebSocket(roomCode, handleSocketMessage);
 
 
   const fetchBoard = useCallback(async () => {
@@ -287,6 +315,16 @@ export default function BoardPage({
     resetDragState();
   };
 
+  const handleSendMessage = async (text: string) => {
+    try {
+      await apiFetch(`/api/chat/message`, {
+        method: "POST",
+        body: JSON.stringify({ room_id: roomCode, sender: "You", message: text }),
+      });
+    } catch {
+      toast("Failed to send chat message.", "warn");
+    }
+  };
   useEffect(() => {
     return () => {
       cancelPendingDragPreview();
@@ -390,6 +428,25 @@ export default function BoardPage({
         <DragOverlay dropAnimation={null}>{activeTask ? <DragTaskCardPreview task={activeTask} /> : null}</DragOverlay>
       </DndContext>
       {drawer && <TaskDrawer task={drawer} onClose={() => setDrawer(null)} onSave={handleSave} onDelete={handleDelete} />}
+
+      <div
+        className={`absolute top-0 right-0 h-full w-80 z-40 transition-transform duration-300 ease-in-out ${
+          isChatOpen ? "translate-x-0" : "translate-x-[280px]"
+        }`}
+      >
+        <button
+          onClick={() => setIsChatOpen((open) => !open)}
+          className="absolute -left-10 top-1/2 -mt-5 p-2 bg-[#08090a] border border-white/[0.06] rounded-l-xl text-[#71717a] hover:text-white"
+          aria-label={isChatOpen ? "Close chat sidebar" : "Open chat sidebar"}
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isChatOpen ? "M15 19l-7-7 7-7" : "M9 5l7 7-7 7"} />
+          </svg>
+        </button>
+        <div className="w-80 h-full bg-[#08090a] border-l border-white/[0.04]">
+          <ChatWindow roomCode={roomCode} messages={chatMessages} onSendMessage={handleSendMessage} />
+        </div>
+      </div>
     </div>
   );
 }
