@@ -116,6 +116,33 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
   useEffect(() => {
     localStorage.setItem(CHAT_MODEL_STORAGE_KEY, selectedModel);
   }, [selectedModel]);
+  const blobToDataUrl = useCallback((blob: Blob) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (typeof reader.result === "string") resolve(reader.result);
+        else reject(new Error("Failed to convert blob to data URL"));
+      };
+      reader.onerror = () => reject(new Error("Failed to read exported image blob"));
+      reader.readAsDataURL(blob);
+    });
+  }, []);
+
+  const exportCurrentWhiteboardImage = useCallback(async (): Promise<string | null> => {
+    if (!excalidrawAPI) return null;
+    const elements = excalidrawAPI.getSceneElements();
+    if (!elements.length) return null;
+    try {
+      const blob = await exportToBlob({
+        elements,
+        appState: { background: "#ffffff" },
+        files: excalidrawAPI.getFiles(),
+      });
+      return await blobToDataUrl(blob);
+    } catch {
+      return null;
+    }
+  }, [blobToDataUrl, excalidrawAPI]);
 
   const fetchChatModels = useCallback(async () => {
     try {
@@ -190,10 +217,18 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
       client_nonce: clientNonce,
     });
     try {
+      const whiteboardImage = await exportCurrentWhiteboardImage();
       const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
         headers: { "X-Gemini-Model": selectedModel },
-        body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce, model: selectedModel }),
+        body: JSON.stringify({
+          room_id: roomCode,
+          sender: "You",
+          message,
+          client_nonce: clientNonce,
+          model: selectedModel,
+          ...(whiteboardImage ? { whiteboard_image_base64: whiteboardImage } : {}),
+        }),
       });
       if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
@@ -513,61 +548,53 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
 
     setStatus("loading");
     setCode("");
-
-    try {
-      const blob = await exportToBlob({
-        elements,
-        appState: { background: "#ffffff" },
-        files: excalidrawAPI.getFiles(),
-      });
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const result = reader.result;
-        if (!result || typeof result !== "string") {
-          setStatus("error");
-          toast("Export failed.", "error");
-          return;
-        }
-        const base64 = result.split(",")[1];
-        try {
-          const { job_id } = await apiFetch<{ job_id: string }>(`/api/whiteboard/generate?room_id=${roomCode}`, {
-            method: "POST",
-            body: JSON.stringify({ image_base64: base64, framework }),
-          });
-
-          let tries = 0;
-          const poll = setInterval(async () => {
-            tries++;
-            try {
-              const job = await apiFetch<{ status: string; code?: string }>(`/api/whiteboard/${job_id}`);
-              if (job.status === "completed") {
-                clearInterval(poll);
-                setCode(job.code || "");
-                setStatus("done");
-                toast("Code generated");
-              } else if (job.status === "error") {
-                clearInterval(poll);
-                setStatus("error");
-                toast("Generation failed.", "error");
-              }
-            } catch {
-              // no-op
-            }
-            if (tries > 30) {
-              clearInterval(poll);
-              setStatus("error");
-              toast("Timed out.", "warn");
-            }
-          }, 1500);
-        } catch {
-          setStatus("error");
-          toast("Backend unreachable.", "error");
-        }
-      };
-      reader.readAsDataURL(blob);
-    } catch {
+    const imageDataUrl = await exportCurrentWhiteboardImage();
+    if (!imageDataUrl) {
       setStatus("error");
       toast("Export failed.", "error");
+      return;
+    }
+
+    try {
+      const { job_id } = await apiFetch<{ job_id: string }>(`/api/whiteboard/generate?room_id=${roomCode}`, {
+        method: "POST",
+        body: JSON.stringify({ image_base64: imageDataUrl, framework }),
+      });
+
+      let tries = 0;
+      const poll = setInterval(async () => {
+        tries++;
+        try {
+          const job = await apiFetch<{ status: string; code?: string }>(`/api/whiteboard/${job_id}`);
+          if (job.status === "completed") {
+            clearInterval(poll);
+            setCode(job.code || "");
+            setStatus("done");
+            if (job.code) {
+              upsertChatMessage({
+                sender: "AI Whiteboard Assistant",
+                message: `Generated ${framework} boilerplate from your sketch:\n\n${job.code}`,
+                timestamp: new Date().toISOString(),
+              });
+            }
+            toast("Code generated");
+          } else if (job.status === "error") {
+            clearInterval(poll);
+            setStatus("error");
+            toast("Generation failed.", "error");
+          }
+        } catch {
+          // no-op
+        }
+        if (tries > 30) {
+          clearInterval(poll);
+          setStatus("error");
+          toast("Timed out.", "warn");
+        }
+      }, 1500);
+    } catch {
+      setStatus("error");
+      toast("Backend unreachable.", "error");
     }
   };
 
@@ -576,21 +603,15 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
     const elements = excalidrawAPI.getSceneElements();
     if (!elements.length) { toast("Draw something first.", "warn"); return; }
     toast("Analyzing sketch...", "info");
+    const imageDataUrl = await exportCurrentWhiteboardImage();
+    if (!imageDataUrl) { toast("Analysis export failed.", "error"); return; }
     try {
-        const blob = await exportToBlob({ elements, appState: { background: "#ffffff" }, files: excalidrawAPI.getFiles() });
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-        if (!reader.result || typeof reader.result !== "string") { toast("Analysis export failed.", "error"); return; }
-        try {
-            await apiFetch(`/api/whiteboard/analyze?room_id=${encodeURIComponent(roomCode)}`, {
-            method: "POST",
-            body: JSON.stringify({ image_base64: reader.result }),
-            });
-            toast("Feedback sent to chat!");
-        } catch { toast("Analysis failed.", "error"); }
-        };
-        reader.readAsDataURL(blob);
-    } catch { toast("Export failed.", "error"); }
+        await apiFetch(`/api/whiteboard/analyze?room_id=${encodeURIComponent(roomCode)}`, {
+          method: "POST",
+          body: JSON.stringify({ image_base64: imageDataUrl }),
+        });
+        toast("Feedback sent to chat!");
+    } catch { toast("Analysis failed.", "error"); }
   }
 
   return (
