@@ -1,8 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
-import type { DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  pointerWithin,
+  rectIntersection,
+  useSensor,
+  useSensors,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
 import { API_BASE, apiFetch } from "../hackbuddyApi";
 import type { Task, ToastFn } from "../hackbuddyTypes";
-import { COLUMNS, Column, type CreateTaskInput, TaskDrawer } from "../components/BoardUI";
+import { COLUMNS, Column, DragTaskCardPreview, type CreateTaskInput, TaskDrawer } from "../components/BoardUI";
 
 export default function BoardPage({
   roomCode,
@@ -17,17 +29,62 @@ export default function BoardPage({
   const [drawer, setDrawer] = useState<Task | null>(null);
   const [retries, setRetries] = useState(0);
   const [voiceLoading, setVoiceLoading] = useState(false);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const preDragSnapshotRef = useRef<Task[] | null>(null);
+  const dragActiveRef = useRef(false);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+  const collisionDetection: CollisionDetection = useCallback((args) => {
+    const pointerCollisions = pointerWithin(args);
+    if (pointerCollisions.length > 0) return pointerCollisions;
+    return rectIntersection(args);
+  }, []);
+
+  const mergeServerTasks = useCallback((currentTasks: Task[], incomingTasks: Task[]) => {
+    const consumed = new Set<string>();
+    const incomingById = new Map(incomingTasks.map((task) => [task.id, task]));
+    const merged: Task[] = [];
+
+    for (const columnName of COLUMNS) {
+      const currentColumnIds = currentTasks.filter((task) => task.column === columnName).map((task) => task.id);
+
+      for (const id of currentColumnIds) {
+        const fresh = incomingById.get(id);
+        if (!fresh || fresh.column !== columnName || consumed.has(id)) continue;
+        merged.push(fresh);
+        consumed.add(id);
+      }
+
+      for (const fresh of incomingTasks) {
+        if (fresh.column !== columnName || consumed.has(fresh.id)) continue;
+        merged.push(fresh);
+        consumed.add(fresh.id);
+      }
+    }
+
+    for (const fresh of incomingTasks) {
+      if (consumed.has(fresh.id)) continue;
+      merged.push(fresh);
+      consumed.add(fresh.id);
+    }
+
+    return merged;
+  }, []);
 
   const fetchBoard = useCallback(async () => {
     try {
       const data = await apiFetch<{ tasks?: Task[] }>(`/api/board/${roomCode}`);
-      setTasks((data.tasks || []).filter((task) => !task.deleted));
+      const incomingTasks = (data.tasks || []).filter((task) => !task.deleted);
+      setTasks((currentTasks) => {
+        if (dragActiveRef.current) return currentTasks;
+        if (currentTasks.length === 0) return incomingTasks;
+        return mergeServerTasks(currentTasks, incomingTasks);
+      });
       onPoll?.();
       setRetries(0);
     } catch {
       setRetries((retryCount) => retryCount + 1);
     }
-  }, [onPoll, roomCode]);
+  }, [mergeServerTasks, onPoll, roomCode]);
 
   useEffect(() => {
     fetchBoard();
@@ -87,13 +144,105 @@ export default function BoardPage({
       toast("Delete failed.", "error");
     }
   };
+  const moveTaskPreview = useCallback(
+    (currentTasks: Task[], activeId: string, overId: string, overColumn?: string) => {
+      const activeIndex = currentTasks.findIndex((task) => task.id === activeId);
+      if (activeIndex === -1) return currentTasks;
+      if (activeId === overId) return currentTasks;
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>, col: string) => {
-    const id = event.dataTransfer.getData("taskId");
-    const task = tasks.find((candidate) => candidate.id === id);
-    if (!task || task.column === col) return;
-    handleSave({ ...task, column: col, updated_at: Date.now() });
-    toast(`Moved to ${col}`);
+      const overTask = currentTasks.find((task) => task.id === overId);
+      const targetColumn = overTask?.column || overColumn;
+      if (!targetColumn) return currentTasks;
+
+      const nextTasks = [...currentTasks];
+      const [removed] = nextTasks.splice(activeIndex, 1);
+      const movedTask: Task = { ...removed, column: targetColumn };
+
+      if (overTask) {
+        const targetIndex = nextTasks.findIndex((task) => task.id === overTask.id);
+        if (targetIndex === -1) {
+          nextTasks.push(movedTask);
+        } else {
+          nextTasks.splice(targetIndex, 0, movedTask);
+        }
+        return nextTasks;
+      }
+
+      const targetColumnOrder = COLUMNS.indexOf(targetColumn as (typeof COLUMNS)[number]);
+      let insertIndex = nextTasks.length;
+      for (let i = 0; i < nextTasks.length; i++) {
+        const rowColumnOrder = COLUMNS.indexOf(nextTasks[i].column as (typeof COLUMNS)[number]);
+        if (rowColumnOrder > targetColumnOrder) {
+          insertIndex = i;
+          break;
+        }
+        if (rowColumnOrder === targetColumnOrder) {
+          insertIndex = i + 1;
+        }
+      }
+
+      nextTasks.splice(insertIndex, 0, movedTask);
+      const isSameLayout =
+        nextTasks.length === currentTasks.length &&
+        nextTasks.every((task, index) => task.id === currentTasks[index]?.id && task.column === currentTasks[index]?.column);
+      if (isSameLayout) return currentTasks;
+      return nextTasks;
+    },
+    [],
+  );
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const activeId = String(event.active.id);
+    if (!tasks.some((task) => task.id === activeId)) return;
+    dragActiveRef.current = true;
+    preDragSnapshotRef.current = tasks;
+    setActiveTaskId(activeId);
+  };
+
+  const handleDragOver = (event: DragOverEvent) => {
+    if (!event.over) return;
+    const activeId = String(event.active.id);
+    const overId = String(event.over.id);
+    const overColumn = typeof event.over.data.current?.column === "string" ? event.over.data.current.column : undefined;
+    setTasks((currentTasks) => moveTaskPreview(currentTasks, activeId, overId, overColumn));
+  };
+
+  const resetDragState = () => {
+    dragActiveRef.current = false;
+    setActiveTaskId(null);
+    preDragSnapshotRef.current = null;
+  };
+
+  const handleDragCancel = () => {
+    if (preDragSnapshotRef.current) {
+      setTasks(preDragSnapshotRef.current);
+    }
+    resetDragState();
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const activeId = String(event.active.id);
+    const beforeDrag = preDragSnapshotRef.current;
+    if (!event.over) {
+      if (beforeDrag) setTasks(beforeDrag);
+      resetDragState();
+      return;
+    }
+    const oldTask = beforeDrag?.find((task) => task.id === activeId);
+    const newTask = tasks.find((task) => task.id === activeId);
+
+    if (!oldTask || !newTask) {
+      resetDragState();
+      return;
+    }
+
+    if (oldTask.column !== newTask.column) {
+      const updated = { ...newTask, updated_at: Date.now() };
+      void handleSave(updated);
+      toast(`Moved to ${newTask.column}`);
+    }
+
+    resetDragState();
   };
 
   const handleVoice = async () => {
@@ -131,6 +280,10 @@ export default function BoardPage({
   };
 
   const colTasks = (col: string) => tasks.filter((task) => task.column === col);
+  const activeTask = useMemo(() => {
+    if (!activeTaskId) return null;
+    return tasks.find((task) => task.id === activeTaskId) || preDragSnapshotRef.current?.find((task) => task.id === activeTaskId) || null;
+  }, [activeTaskId, tasks]);
 
   return (
     <div className="flex flex-col h-full bg-[#08090a] relative">
@@ -166,18 +319,28 @@ export default function BoardPage({
         </button>
       </div>
 
-      <div className="flex-1 overflow-x-auto overflow-y-hidden p-5 flex gap-4 min-h-0 relative z-10">
-        {COLUMNS.map((columnName) => (
-          <Column
-            key={columnName}
-            col={columnName}
-            tasks={colTasks(columnName)}
-            onAdd={handleAdd}
-            onOpen={setDrawer}
-            onDrop={handleDrop}
-          />
-        ))}
-      </div>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={collisionDetection}
+        onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
+        onDragCancel={handleDragCancel}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="flex-1 overflow-x-auto overflow-y-hidden p-5 flex gap-4 min-h-0 relative z-10">
+          {COLUMNS.map((columnName) => (
+            <Column
+              key={columnName}
+              col={columnName}
+              tasks={colTasks(columnName)}
+              onAdd={handleAdd}
+              onOpen={setDrawer}
+              activeTaskId={activeTaskId}
+            />
+          ))}
+        </div>
+        <DragOverlay dropAnimation={null}>{activeTask ? <DragTaskCardPreview task={activeTask} /> : null}</DragOverlay>
+      </DndContext>
 
       {drawer && <TaskDrawer task={drawer} onClose={() => setDrawer(null)} onSave={handleSave} onDelete={handleDelete} />}
     </div>

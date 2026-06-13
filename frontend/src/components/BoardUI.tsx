@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DragEvent } from "react";
+import { useDroppable } from "@dnd-kit/core";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import type { Task } from "../hackbuddyTypes";
 import { hashColor } from "../hackbuddyUtils";
 
@@ -8,25 +10,9 @@ const COL_COLOR = { Backlog: "#71717a", "In Progress": "#f59e0b", Done: "#22c55e
 
 export type CreateTaskInput = { title: string; description: string; column: string };
 
-function Card({
-  task,
-  onClick,
-  onDragStart,
-}: {
-  task: Task;
-  onClick: () => void;
-  onDragStart: (id: string) => void;
-}) {
+function TaskCardContent({ task }: { task: Task }) {
   return (
-    <div
-      draggable
-      onDragStart={(event) => {
-        event.dataTransfer.setData("taskId", task.id);
-        onDragStart(task.id);
-      }}
-      onClick={onClick}
-      className="bg-white/[0.02] border border-white/[0.06] hover:border-white/[0.12] hover:bg-white/[0.04] rounded-xl p-3.5 cursor-pointer transition-all group select-none"
-    >
+    <>
       <p className="text-[13px] font-medium text-white leading-snug mb-1.5">{task.title}</p>
       {task.description && <p className="text-[12px] text-[#71717a] leading-relaxed line-clamp-2 mb-2.5">{task.description}</p>}
       <div className="flex items-center justify-between">
@@ -45,6 +31,55 @@ function Card({
         )}
         <span className="text-[10px] text-[#3f3f46] font-mono">{task.id?.slice(0, 8)}</span>
       </div>
+    </>
+  );
+}
+
+function DropSkeletonCard() {
+  return (
+    <div className="border border-dashed border-white/[0.15] rounded-xl p-3.5 bg-white/[0.02] min-h-[76px] animate-pulse">
+      <div className="h-3 w-[65%] bg-white/[0.08] rounded mb-2.5" />
+      <div className="h-2.5 w-[90%] bg-white/[0.05] rounded mb-1.5" />
+      <div className="h-2.5 w-[72%] bg-white/[0.05] rounded" />
+    </div>
+  );
+}
+
+function Card({
+  task,
+  onClick,
+  isDropPlaceholder,
+}: {
+  task: Task;
+  onClick: () => void;
+  isDropPlaceholder: boolean;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: task.id,
+    data: { type: "task", column: task.column },
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  const showingPlaceholder = isDropPlaceholder && isDragging;
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      {showingPlaceholder ? (
+        <DropSkeletonCard />
+      ) : (
+        <div
+          {...attributes}
+          {...listeners}
+          onClick={onClick}
+          className="bg-white/[0.02] border border-white/[0.06] hover:border-white/[0.12] hover:bg-white/[0.04] rounded-xl p-3.5 cursor-grab active:cursor-grabbing transition-all group select-none touch-none"
+        >
+          <TaskCardContent task={task} />
+        </div>
+      )}
     </div>
   );
 }
@@ -110,36 +145,38 @@ function InlineForm({
   );
 }
 
+export function DragTaskCardPreview({ task }: { task: Task }) {
+  return (
+    <div className="bg-[#111319] border border-white/[0.16] rounded-xl p-3.5 shadow-[0_16px_36px_rgba(0,0,0,0.55)] w-[274px] rotate-[1.2deg] pointer-events-none">
+      <TaskCardContent task={task} />
+    </div>
+  );
+}
+
 export function Column({
   col,
   tasks,
   onAdd,
   onOpen,
-  onDrop,
+  activeTaskId,
 }: {
   col: string;
   tasks: Task[];
   onAdd: (data: CreateTaskInput) => void;
   onOpen: (task: Task) => void;
-  onDrop: (event: DragEvent<HTMLDivElement>, col: string) => void;
+  activeTaskId: string | null;
 }) {
   const [adding, setAdding] = useState(false);
-  const [over, setOver] = useState(false);
+  const { isOver, setNodeRef } = useDroppable({
+    id: `column:${col}`,
+    data: { type: "column", column: col },
+  });
 
   return (
     <div
       className={`flex flex-col bg-[#0f1012]/60 backdrop-blur-sm border rounded-2xl w-[300px] shrink-0 transition-all ${
-        over ? "border-white/[0.15] bg-white/[0.03]" : "border-white/[0.04]"
+        isOver ? "border-white/[0.15] bg-white/[0.03]" : "border-white/[0.04]"
       }`}
-      onDragOver={(event) => {
-        event.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(event) => {
-        setOver(false);
-        onDrop(event, col);
-      }}
     >
       <div className="flex items-center gap-2.5 px-4 pt-4 pb-3 border-b border-white/[0.04] shrink-0">
         <div
@@ -153,15 +190,21 @@ export function Column({
         <span className="text-[11px] text-[#52525b] bg-white/[0.04] rounded-full px-2.5 py-1 font-medium">{tasks.length}</span>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2.5 min-h-0">
-        {tasks.length === 0 && !adding && (
-          <div className="flex-1 flex items-center justify-center min-h-[80px] border border-dashed border-white/[0.06] rounded-xl">
-            <span className="text-[12px] text-[#3f3f46]">Drop cards here</span>
-          </div>
-        )}
-        {tasks.map((task) => (
-          <Card key={task.id} task={task} onClick={() => onOpen(task)} onDragStart={() => {}} />
-        ))}
+      <div ref={setNodeRef} className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2.5 min-h-0">
+        <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
+          {tasks.length === 0 && !adding ? (
+            isOver && activeTaskId ? (
+              <DropSkeletonCard />
+            ) : (
+              <div className="flex-1 flex items-center justify-center min-h-[80px] border border-dashed border-white/[0.06] rounded-xl">
+                <span className="text-[12px] text-[#3f3f46]">Drop cards here</span>
+              </div>
+            )
+          ) : null}
+          {tasks.map((task) => (
+            <Card key={task.id} task={task} onClick={() => onOpen(task)} isDropPlaceholder={activeTaskId === task.id} />
+          ))}
+        </SortableContext>
       </div>
 
       <div className="px-3 pb-3 pt-1 shrink-0">
