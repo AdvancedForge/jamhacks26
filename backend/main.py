@@ -414,6 +414,56 @@ def _is_clear_chat_command(message: str) -> bool:
     return command in {"/clear", "/clear-chat", "/clearchat"}
 
 
+def _is_whiteboard_code_request(message: str) -> bool:
+    lowered = (message or "").strip().lower()
+    if not lowered:
+        return False
+    code_markers = [
+        "turn this into html",
+        "convert this to html",
+        "can you turn this",
+        "make code",
+        "generate code",
+        "boilerplate",
+        "convert this webpage",
+        "build this ui",
+        "code for this",
+        "html code",
+        "css code",
+        "react code",
+    ]
+    return any(marker in lowered for marker in code_markers)
+
+
+def _infer_code_target(message: str) -> str:
+    lowered = (message or "").strip().lower()
+    if "html" in lowered:
+        return "html"
+    if "react" in lowered or "tsx" in lowered or "jsx" in lowered:
+        return "react"
+    if "css" in lowered:
+        return "css"
+    return "html"
+
+
+def _build_whiteboard_chat_code_prompt(
+    *,
+    target: str,
+    user_message: str,
+    whiteboard_summary: str,
+) -> str:
+    return (
+        f"You are a senior frontend engineer. The user asked: \"{user_message}\".\n"
+        f"Whiteboard scene summary: {whiteboard_summary}\n"
+        f"Generate simple, clean {target} code from the attached whiteboard sketch.\n"
+        "Requirements:\n"
+        "- Keep it concise and beginner-friendly.\n"
+        "- Preserve visible structure and labels from the sketch.\n"
+        "- If there is a visible symbol (e.g. smiley), include an equivalent UI detail.\n"
+        "- Return only code with no markdown fences and no extra explanation."
+    )
+
+
 async def _clear_room_chat_messages(
     room_id: str, requested_by: str = "You"
 ) -> Dict[str, Any]:
@@ -817,6 +867,7 @@ async def send_chat_message(
     await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": True})
 
     task_title: Optional[str] = None
+    ai_model_used = selected_model
 
     # Unified AI Intent and Reply
     try:
@@ -838,100 +889,129 @@ async def send_chat_message(
                 )
             except ValueError as decode_error:
                 logger.warning(f"Skipping invalid whiteboard image payload: {decode_error}")
-        # Fetch board data
-        board_data = await get_board(chat.room_id)
 
         whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
         whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
-
-        # Format board/roadmap context for AI
-        tasks_summary = "\n".join(
-            [
-                f"- ID: {t['id']}, Title: {t['title']}, Status: {t['column']}"
-                for t in board_data.get("tasks", [])
-            ]
-        )
-        roadmap_content = board_data.get("roadmap", "No roadmap content.")
-
-        prompt = (
-            "You are HackBuddy AI, a project board assistant. "
-            "You have access to the project board tasks and the roadmap. "
-            "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
-            'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": "..."}. '
-            '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
-            '"roadmap" should contain the updated roadmap markdown content if the user requests changes to it, otherwise omit this field. '
-            '"reply" MUST be a direct, relevant answer to the user. '
-            "If the user asks a question, answer it based on the provided tasks and roadmap. "
-            "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
-            "If the request is unclear, politely ask for clarification. "
-            'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
-            "Do NOT include any other text, chain-of-thought, or prompt echoes."
-        )
-
-        full_prompt = (
-            f"{prompt}\n\n"
-            f"--- Context ---\n"
-            f"Whiteboard: {whiteboard_summary}\n"
-            f"Whiteboard image context: {whiteboard_image_hint}\n"
-            f"Tasks:\n{tasks_summary}\n"
-            f"Roadmap:\n{roadmap_content}\n"
-            f"---------------\n"
-            f'User message: "{chat.message}"'
-        )
-        generation_payload: Any = full_prompt
-        ai_model_used = selected_model
-        if whiteboard_image_part:
-            generation_payload = [full_prompt, whiteboard_image_part]
-
-        try:
-            response = await reply_model.generate_content_async(generation_payload)
-        except Exception as multimodal_error:
-            if not whiteboard_image_part:
-                raise
-            logger.warning(
-                f"Primary chat model could not use whiteboard image, retrying with vision model: {multimodal_error}"
+        if _is_whiteboard_code_request(chat.message):
+            target = _infer_code_target(chat.message)
+            if whiteboard_image_part:
+                whiteboard_generation_model, _ = _create_whiteboard_models()
+                response = await whiteboard_generation_model.generate_content_async(
+                    [
+                        _build_whiteboard_chat_code_prompt(
+                            target=target,
+                            user_message=chat.message,
+                            whiteboard_summary=whiteboard_summary,
+                        ),
+                        whiteboard_image_part,
+                    ]
+                )
+                ai_model_used = WHITEBOARD_VISION_MODEL
+            else:
+                fallback_prompt = (
+                    f'User message: "{chat.message}"\n'
+                    f"Whiteboard summary: {whiteboard_summary}\n"
+                    f"Generate simple {target} code. Return only code and no explanation."
+                )
+                response = await reply_model.generate_content_async(fallback_prompt)
+            ai_reply = _strip_markdown_code_fences(response.text)
+            if not ai_reply:
+                ai_reply = (
+                    "I couldn't generate code from the sketch yet. Try adding clearer labels "
+                    "to the whiteboard and ask again."
+                )
+        else:
+            # Fetch board data for task/roadmap-aware chat responses.
+            board_data = await get_board(chat.room_id)
+            tasks_summary = "\n".join(
+                [
+                    f"- ID: {t['id']}, Title: {t['title']}, Status: {t['column']}"
+                    for t in board_data.get("tasks", [])
+                ]
             )
-            _, whiteboard_reply_model = _create_whiteboard_models()
-            response = await whiteboard_reply_model.generate_content_async(
-                generation_payload
+            roadmap_content = board_data.get("roadmap", "No roadmap content.")
+
+            prompt = (
+                "You are HackBuddy AI, a project board assistant. "
+                "You have access to the project board tasks and the roadmap. "
+                "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
+                'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": "..."}. '
+                '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
+                '"roadmap" should contain the updated roadmap markdown content if the user requests changes to it, otherwise omit this field. '
+                '"reply" MUST be a direct, relevant answer to the user. '
+                "If the user asks a question, answer it based on the provided tasks and roadmap. "
+                "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
+                "If the request is unclear, politely ask for clarification. "
+                'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
+                "Do NOT include any other text, chain-of-thought, or prompt echoes."
             )
-            ai_model_used = WHITEBOARD_VISION_MODEL
-        result = _extract_json_object(response.text)
 
-        # 1. Handle Tasks
-        if result and "tasks" in result and isinstance(result["tasks"], list):
-            for task_data in result["tasks"]:
-                # Check if it's an update (has id) or create
-                if "id" in task_data:
-                    # Logic to update existing task
-                    task = Task(
-                        title=str(task_data.get("title") or "Untitled Task"),
-                        description=str(task_data.get("description") or ""),
-                        column=str(task_data.get("column") or "Backlog"),
-                        assignee=str(task_data.get("assignee") or ""),
-                        updated_at=int(time.time() * 1000),
-                    )
-                    await update_task(chat.room_id, task_data["id"], task)
-                else:
-                    # Create new task
-                    task = Task(
-                        title=str(task_data.get("title") or "Untitled Task"),
-                        description=str(task_data.get("description") or ""),
-                        column=str(task_data.get("column") or "Backlog"),
-                        assignee=str(task_data.get("assignee") or ""),
-                        created_at=int(time.time() * 1000),
-                    )
-                    await create_task(chat.room_id, task)
+            full_prompt = (
+                f"{prompt}\n\n"
+                f"--- Context ---\n"
+                f"Whiteboard: {whiteboard_summary}\n"
+                f"Whiteboard image context: {whiteboard_image_hint}\n"
+                f"Tasks:\n{tasks_summary}\n"
+                f"Roadmap:\n{roadmap_content}\n"
+                f"---------------\n"
+                f'User message: "{chat.message}"'
+            )
+            generation_payload: Any = full_prompt
+            if whiteboard_image_part:
+                generation_payload = [full_prompt, whiteboard_image_part]
 
-        # 2. Handle Roadmap Update
-        if result and "roadmap" in result and isinstance(result["roadmap"], str):
-            await update_roadmap(chat.room_id, {"roadmap": result["roadmap"]})
+            try:
+                response = await reply_model.generate_content_async(generation_payload)
+            except Exception as multimodal_error:
+                if not whiteboard_image_part:
+                    raise
+                logger.warning(
+                    f"Primary chat model could not use whiteboard image, retrying with vision model: {multimodal_error}"
+                )
+                _, whiteboard_reply_model = _create_whiteboard_models()
+                response = await whiteboard_reply_model.generate_content_async(
+                    generation_payload
+                )
+                ai_model_used = WHITEBOARD_VISION_MODEL
 
-        # 3. Handle Reply
-        ai_reply = result.get("reply") if result and isinstance(result, dict) else None
-        if not ai_reply:
-            ai_reply = "I'm not sure how to answer that, could you rephrase?"
-        ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
+            result = _extract_json_object(response.text)
+
+            # 1. Handle Tasks
+            if result and "tasks" in result and isinstance(result["tasks"], list):
+                for task_data in result["tasks"]:
+                    # Check if it's an update (has id) or create
+                    if "id" in task_data:
+                        # Logic to update existing task
+                        task = Task(
+                            title=str(task_data.get("title") or "Untitled Task"),
+                            description=str(task_data.get("description") or ""),
+                            column=str(task_data.get("column") or "Backlog"),
+                            assignee=str(task_data.get("assignee") or ""),
+                            updated_at=int(time.time() * 1000),
+                        )
+                        await update_task(chat.room_id, task_data["id"], task)
+                    else:
+                        # Create new task
+                        task = Task(
+                            title=str(task_data.get("title") or "Untitled Task"),
+                            description=str(task_data.get("description") or ""),
+                            column=str(task_data.get("column") or "Backlog"),
+                            assignee=str(task_data.get("assignee") or ""),
+                            created_at=int(time.time() * 1000),
+                        )
+                        await create_task(chat.room_id, task)
+
+            # 2. Handle Roadmap Update
+            if result and "roadmap" in result and isinstance(result["roadmap"], str):
+                await update_roadmap(chat.room_id, {"roadmap": result["roadmap"]})
+
+            # 3. Handle Reply
+            ai_reply = result.get("reply") if result and isinstance(result, dict) else None
+            if not ai_reply:
+                ai_reply = _strip_markdown_code_fences(response.text)
+            if not ai_reply:
+                ai_reply = "I'm not sure how to answer that, could you rephrase?"
+            ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
     except Exception as e:
         logger.warning(f"AI error: {e}")
         ai_reply = (
