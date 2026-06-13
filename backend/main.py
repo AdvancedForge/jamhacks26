@@ -294,6 +294,61 @@ def _chunk_chat_reply(text: str, max_chars: int = 28) -> List[str]:
         chunks.append(current)
     return chunks or [text]
 
+def _sanitize_chat_reply(raw_text: str) -> str:
+    import re
+
+    if not raw_text:
+        return ""
+
+    text = raw_text.replace("```", "").strip()
+    if not text:
+        return ""
+
+    if text.lower().startswith("hackbuddy ai:"):
+        text = text.split(":", 1)[1].strip()
+
+    blocked_markers = [
+        "user says",
+        "role:",
+        "constraints:",
+        "friendly response needed",
+        "no concrete work requested",
+        "the user is",
+        "chain-of-thought",
+        "thinking process",
+    ]
+
+    if any(marker in text.lower() for marker in blocked_markers):
+        pieces = re.split(r"(?:\n+|\s\*\s|\*)", text)
+        cleaned_parts: List[str] = []
+        for piece in pieces:
+            candidate = piece.strip(" \t\r\n-•")
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            if any(marker in lowered for marker in blocked_markers):
+                continue
+            if lowered.startswith("hackbuddy ai:"):
+                candidate = candidate.split(":", 1)[1].strip()
+            if candidate:
+                cleaned_parts.append(candidate)
+        if cleaned_parts:
+            text = " ".join(cleaned_parts).strip()
+
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    if any(marker in lowered for marker in blocked_markers):
+        return ""
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    if len(sentences) > 3:
+        text = " ".join(sentences[:3]).strip()
+
+    return text
+
 # --- Chat Endpoints ---
 
 @app.post("/api/chat/message")
@@ -334,8 +389,16 @@ async def send_chat_message(chat: ChatMessage):
     # Natural-language AI chat reply
     ai_reply = ""
     try:
-        reply_response = await chat_model.generate_content_async(chat.message)
-        ai_reply = (reply_response.text or "").strip()
+        reply_prompt = (
+            f'User message: "{chat.message}"\n'
+            "Respond as HackBuddy AI in 1 to 3 short conversational sentences.\n"
+            "If concrete work is requested, include actionable next steps.\n"
+            "Output ONLY the final response text for the user.\n"
+            "Do NOT output analysis, planning, role labels, bullet points, or any text like "
+            "\"User says\", \"Role\", or \"Constraints\"."
+        )
+        reply_response = await chat_model.generate_content_async(reply_prompt)
+        ai_reply = _sanitize_chat_reply((reply_response.text or "").strip())
     except Exception as e:
         logger.warning(f"AI reply warning: {e}")
 
