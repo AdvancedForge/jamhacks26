@@ -20,7 +20,7 @@ export const Home = () => {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[80vh] text-center">
-      <h1 className="text-5xl font-extrabold text-blue-400 mb-6">HackBuddy</h1>
+      <h1 className="text-5xl font-extrabold text-blue-400 mb-6">HackPilot</h1>
       <p className="text-gray-400 mb-8 max-w-md">Your real-time hackathon co-pilot. Create a room or join an existing one to get started.</p>
       <div className="flex gap-2">
         <input 

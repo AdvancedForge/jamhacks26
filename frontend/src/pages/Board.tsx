@@ -13,18 +13,10 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { API_BASE, apiFetch } from "../hackbuddyApi";
-import type { Task, ToastFn } from "../hackbuddyTypes";
+import type { Task, ToastFn, ChatMessage } from "../hackbuddyTypes";
 import { COLUMNS, Column, DragTaskCardPreview, type CreateTaskInput, TaskDrawer } from "../components/BoardUI";
 import { ChatWindow } from "../components/ChatWindow";
 import { useBoardWebSocket } from "../hooks/useBoardWebSocket";
-
-type ChatMessage = {
-  id?: string;
-  sender: string;
-  message: string;
-  timestamp?: string;
-  client_nonce?: string;
-};
 
 export default function BoardPage({
   roomCode,

@@ -22,6 +22,7 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [isAiThinking, setIsAiThinking] = useState(false);
 
   const applyingRemoteRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
@@ -34,8 +35,13 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
   const actorIdRef = useRef(`wb_${Math.random().toString(36).slice(2, 10)}`);
 
   const handleMessage = useCallback((message: any) => {
-    if (message.type === 'CHAT_MESSAGE') {
+    switch (message.type) {
+      case 'CHAT_MESSAGE':
         setChatMessages((prev) => [...prev, message.message]);
+        break;
+      case 'CHAT_THINKING':
+        setIsAiThinking(message.status);
+        break;
     }
   }, []);
   useBoardWebSocket(roomCode || "", handleMessage);
@@ -194,6 +200,7 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
   );
 
   const fetchSharedScene = useCallback(async () => {
+    if (!roomCode) return;
     const requestId = ++fetchRequestIdRef.current;
     try {
       const data = await apiFetch<{ scene?: unknown; updated_at?: number; scene_version?: number }>(
@@ -293,8 +300,9 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
     const poll = window.setInterval(fetchSharedScene, 2500);
     return () => window.clearInterval(poll);
   }, [excalidrawAPI, fetchSharedScene]);
-
   useEffect(() => {
+    if (!roomCode) return;
+
     const ws = new WebSocket(`${WS_BASE}/ws/board/${roomCode}`);
     const pingInterval = window.setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send("ping");
@@ -468,7 +476,7 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
                 </svg>
             </button>
             <div className="w-80 h-full border-l border-white/[0.04] bg-[#08090a]">
-                {isChatOpen && <ChatWindow messages={chatMessages} onSendMessage={handleSendMessage} />}
+                {isChatOpen && <ChatWindow roomCode={roomCode || ""} messages={chatMessages} onSendMessage={handleSendMessage} isAiThinking={isAiThinking} />}
             </div>
         </div>
     </div>

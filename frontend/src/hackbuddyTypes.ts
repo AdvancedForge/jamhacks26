@@ -10,6 +10,15 @@ export type Toast = {
 
 export type ToastFn = (msg: ReactNode, type?: ToastType) => void;
 
+export interface ChatMessage {
+  id?: string;
+  room_id?: string;
+  sender: string;
+  message: string;
+  timestamp?: string;
+  client_nonce?: string;
+}
+
 export type Task = {
   id: string;
   title: string;
