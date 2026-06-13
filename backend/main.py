@@ -578,9 +578,12 @@ async def send_chat_message(
     try:
         prompt = (
             "You are HackBuddy AI, a project board assistant. "
-            "Analyze the message. If the user wants to create one or more tasks, "
-            'return ONLY valid JSON: {"tasks": [{"title": "...", "description": "...", "column": "...", "assignee": "..."}], "reply": "..."}. '
-            'Otherwise, return {"tasks": [], "reply": "..."}. '
+            "Analyze the message. "
+            'Return valid JSON: {"tasks": [...], "reply": "..."}. '
+            '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates. If no tasks are needed, return an empty list []. '
+            '"reply" MUST be a conversational, helpful response to the user. '
+            'If you do not create tasks, still provide a meaningful conversational reply based on the message and board context. '
+            'Do NOT just say "Got your message!". '
             "Do NOT include any other text, chain-of-thought, or prompt echoes."
         )
         
@@ -598,23 +601,36 @@ async def send_chat_message(
         # 1. Handle Tasks
         if result and "tasks" in result and isinstance(result["tasks"], list):
             for task_data in result["tasks"]:
-                task = Task(
-                    title=str(task_data.get("title") or "Untitled Task"),
-                    description=str(task_data.get("description") or ""),
-                    column=str(task_data.get("column") or "Backlog"),
-                    assignee=str(task_data.get("assignee") or ""),
-                    created_at=int(time.time() * 1000)
-                )
-                await create_task(chat.room_id, task)
+                # Check if it's an update (has id) or create
+                if "id" in task_data:
+                    # Logic to update existing task
+                    task = Task(
+                        title=str(task_data.get("title") or "Untitled Task"),
+                        description=str(task_data.get("description") or ""),
+                        column=str(task_data.get("column") or "Backlog"),
+                        assignee=str(task_data.get("assignee") or ""),
+                        updated_at=int(time.time() * 1000)
+                    )
+                    await update_task(chat.room_id, task_data["id"], task)
+                else:
+                    # Create new task
+                    task = Task(
+                        title=str(task_data.get("title") or "Untitled Task"),
+                        description=str(task_data.get("description") or ""),
+                        column=str(task_data.get("column") or "Backlog"),
+                        assignee=str(task_data.get("assignee") or ""),
+                        created_at=int(time.time() * 1000)
+                    )
+                    await create_task(chat.room_id, task)
 
         # 2. Handle Reply
         ai_reply = result.get("reply") if result and isinstance(result, dict) else None
         if not ai_reply:
-            ai_reply = "Got your message!"
+            ai_reply = "I've processed your request. Is there anything else you need help with?"
         ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
     except Exception as e:
         logger.warning(f"AI error: {e}")
-        ai_reply = "Got your message, but I had trouble processing it."
+        ai_reply = "I had trouble processing that, could you try phrasing it differently?"
 
     if not ai_reply:
         ai_reply = _safe_chat_fallback(chat.message, task_title)
