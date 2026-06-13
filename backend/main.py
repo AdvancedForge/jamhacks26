@@ -294,11 +294,12 @@ def _chunk_chat_reply(text: str, max_chars: int = 28) -> List[str]:
         chunks.append(current)
     return chunks or [text]
 
-def _sanitize_chat_reply(raw_text: str) -> str:
+def _sanitize_chat_reply(raw_text: str, user_message: str = "") -> str:
     import re
 
     if not raw_text:
         return ""
+    normalized_user_message = re.sub(r"\s+", " ", (user_message or "")).strip().strip("\"“”")
 
     text = raw_text.replace("```", "").strip()
     if not text:
@@ -310,15 +311,33 @@ def _sanitize_chat_reply(raw_text: str) -> str:
     blocked_markers = [
         "user says",
         "role:",
+        "my role:",
         "constraints:",
         "friendly response needed",
         "no concrete work requested",
         "the user is",
         "chain-of-thought",
         "thinking process",
+        "conversational reply",
+        "short sentences",
+        "output only the direct response",
+        "greeting back",
+        "asking how i can help",
+        "critical:",
     ]
+    meta_detected = any(marker in text.lower() for marker in blocked_markers)
 
-    if any(marker in text.lower() for marker in blocked_markers):
+    if meta_detected:
+        quoted_candidates = re.findall(r"[\"“](.+?)[\"”]", text)
+        for quoted in reversed(quoted_candidates):
+            candidate = re.sub(r"\s+", " ", quoted).strip()
+            lowered_candidate = candidate.lower()
+            if normalized_user_message and lowered_candidate == normalized_user_message.lower():
+                continue
+            if len(candidate.split()) <= 1 and len(candidate) < 12:
+                continue
+            if candidate and not any(marker in lowered_candidate for marker in blocked_markers):
+                return candidate
         pieces = re.split(r"(?:\n+|\s\*\s|\*)", text)
         cleaned_parts: List[str] = []
         for piece in pieces:
@@ -328,12 +347,14 @@ def _sanitize_chat_reply(raw_text: str) -> str:
             lowered = candidate.lower()
             if any(marker in lowered for marker in blocked_markers):
                 continue
+            if re.match(r"^(?:\d+[\).]?\s*)?(?:respond|output|suggest|ask|greet|conversation|conversational)\b", lowered):
+                continue
             if lowered.startswith("hackbuddy ai:"):
                 candidate = candidate.split(":", 1)[1].strip()
             if candidate:
                 cleaned_parts.append(candidate)
         if cleaned_parts:
-            text = " ".join(cleaned_parts).strip()
+            text = cleaned_parts[-1].strip()
 
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
@@ -342,12 +363,26 @@ def _sanitize_chat_reply(raw_text: str) -> str:
     lowered = text.lower()
     if any(marker in lowered for marker in blocked_markers):
         return ""
+    if normalized_user_message and lowered == normalized_user_message.lower():
+        return ""
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
     if len(sentences) > 3:
         text = " ".join(sentences[:3]).strip()
 
     return text
+
+def _safe_chat_fallback(user_message: str, task_title: Optional[str] = None) -> str:
+    import re
+
+    if task_title:
+        return f"Got it — I created a task for this: \"{task_title}\"."
+
+    lowered = (user_message or "").strip().lower()
+    if re.search(r"\b(hi|hello|hey|yo|yoo|wagwan|what'?s up|sup)\b", lowered):
+        return "Hey! I’m here and ready to help. What do you want to tackle on the board?"
+
+    return "Got your message. I can help break this into clear next tasks."
 
 # --- Chat Endpoints ---
 
@@ -398,15 +433,12 @@ async def send_chat_message(chat: ChatMessage):
             "\"User says\", \"Role\", or \"Constraints\"."
         )
         reply_response = await chat_model.generate_content_async(reply_prompt)
-        ai_reply = _sanitize_chat_reply((reply_response.text or "").strip())
+        ai_reply = _sanitize_chat_reply((reply_response.text or "").strip(), chat.message)
     except Exception as e:
         logger.warning(f"AI reply warning: {e}")
 
     if not ai_reply:
-        if task_title:
-            ai_reply = f"Got it — I created a task for this: \"{task_title}\"."
-        else:
-            ai_reply = "Got your message. I can help break this into clear next tasks."
+        ai_reply = _safe_chat_fallback(chat.message, task_title)
     ai_object_id = ObjectId() if db_connected else None
     ai_message_id = str(ai_object_id) if ai_object_id else f"temp_ai_{int(time.time() * 1000)}"
     ai_message_dict: Dict[str, Any] = {
