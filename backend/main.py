@@ -217,7 +217,55 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(room_id, websocket)
 
-# --- Kanban Endpoints ---
+from datetime import datetime
+
+# ... (Models)
+
+class ChatMessage(BaseModel):
+    room_id: str
+    sender: str
+    message: str
+
+import google.generativeai as genai
+
+# Initialize Gemini
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+model = genai.GenerativeModel('gemini-1.5-flash')
+
+# ... (Chat Endpoint)
+
+@app.post("/api/chat/message")
+async def send_chat_message(chat: ChatMessage):
+    if await is_db_connected():
+        message_dict = chat.dict()
+        message_dict["timestamp"] = datetime.now().isoformat()
+        result = await db.chat_messages.insert_one(message_dict)
+        message_dict["id"] = str(result.inserted_id)
+        
+        # Broadcast chat message
+        await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": message_dict})
+        
+        # Intelligent intent detection using Gemini
+        try:
+            prompt = f"Analyze this user message: '{chat.message}'. If the user wants to 'create a task', extract the title. Return ONLY a valid JSON object: {{'action': 'create_task', 'title': '...'}}. If not, return {{'action': 'ignore'}}."
+            
+            response = await model.generate_content_async(prompt)
+            
+            # Clean up response (Gemini sometimes adds markdown backticks)
+            content = response.text.replace("```json", "").replace("```", "").strip()
+            
+            import json
+            intent = json.loads(content)
+            
+            if intent.get("action") == "create_task":
+                task_title = intent.get("title")
+                task = Task(title=task_title, created_at=int(datetime.now().timestamp()))
+                await create_task(chat.room_id, task)
+        except Exception as e:
+            logger.error(f"AI processing error: {e}")
+            
+        return {"ok": True}
+    return {"ok": False}
 
 @app.post("/api/room/create")
 async def create_room():
