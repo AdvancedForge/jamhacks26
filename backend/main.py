@@ -227,6 +227,7 @@ class ChatMessage(BaseModel):
     room_id: str
     sender: str
     message: str
+    client_nonce: Optional[str] = None
 
 import base64
 
@@ -236,40 +237,101 @@ import google.generativeai as genai
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel('gemma-4-31b-it')
 
+def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+    if not raw_text:
+        return None
+
+    import json
+    import re
+
+    content = raw_text.replace("```json", "").replace("```", "").strip()
+    if not content:
+        return None
+
+    if not content.startswith("{"):
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if match:
+            content = match.group(0)
+
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return None
+    return None
+
 # --- Chat Endpoints ---
 
 @app.post("/api/chat/message")
 async def send_chat_message(chat: ChatMessage):
-    if await is_db_connected():
-        message_dict = chat.dict()
-        message_dict["timestamp"] = datetime.now().isoformat()
+    db_connected = await is_db_connected()
+    message_dict = chat.model_dump(exclude_none=True)
+    message_dict["timestamp"] = datetime.now().isoformat()
+
+    if db_connected:
         result = await db.chat_messages.insert_one(message_dict)
         message_dict["id"] = str(result.inserted_id)
-        
-        # Broadcast chat message
-        await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": message_dict})
-        
-        # Intelligent intent detection using Gemini
-        try:
-            prompt = f"Analyze this user message: '{chat.message}'. If the user wants to 'create a task', extract the title. Return ONLY a valid JSON object: {{'action': 'create_task', 'title': '...'}}. If not, return {{'action': 'ignore'}}."
-            
-            response = await model.generate_content_async(prompt)
-            
-            # Clean up response (Gemini sometimes adds markdown backticks)
-            content = response.text.replace("```json", "").replace("```", "").strip()
-            
-            import json
-            intent = json.loads(content)
-            
-            if intent.get("action") == "create_task":
-                task_title = intent.get("title")
-                task = Task(title=task_title, created_at=int(datetime.now().timestamp()))
+    else:
+        message_dict["id"] = f"temp_{int(time.time() * 1000)}"
+
+    # Broadcast chat message even when DB is unavailable.
+    await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": message_dict})
+
+    task_title: Optional[str] = None
+
+    # Intent detection for task creation
+    try:
+        intent_prompt = (
+            f"Analyze this user message: '{chat.message}'. "
+            'If the user wants to create a task, return ONLY valid JSON like {"action":"create_task","title":"..."}; '
+            'otherwise return {"action":"ignore"}.'
+        )
+        intent_response = await model.generate_content_async(intent_prompt)
+        intent = _extract_json_object((intent_response.text or "").strip())
+        if intent and intent.get("action") == "create_task":
+            task_title = str(intent.get("title") or "").strip()
+            if task_title:
+                task = Task(title=task_title, created_at=int(datetime.now().timestamp() * 1000))
                 await create_task(chat.room_id, task)
-        except Exception as e:
-            logger.error(f"AI processing error: {e}")
-            
-        return {"ok": True}
-    return {"ok": False}
+    except Exception as e:
+        logger.warning(f"AI processing warning: {e}")
+    # Natural-language AI chat reply
+    ai_reply = ""
+    try:
+        reply_prompt = (
+            "You are HackBuddy AI helping a team collaborate on a project board. "
+            "Reply conversationally to the user in 1-3 short sentences. "
+            "If they ask for concrete work, suggest actionable next steps."
+            f"\nUser message: {chat.message}"
+        )
+        reply_response = await model.generate_content_async(reply_prompt)
+        ai_reply = (reply_response.text or "").strip()
+    except Exception as e:
+        logger.warning(f"AI reply warning: {e}")
+
+    if not ai_reply:
+        if task_title:
+            ai_reply = f"Got it — I created a task for this: \"{task_title}\"."
+        else:
+            ai_reply = "Got your message. I can help break this into clear next tasks."
+
+    ai_message_dict: Dict[str, Any] = {
+        "room_id": chat.room_id,
+        "sender": "HackBuddy AI",
+        "message": ai_reply,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    if db_connected:
+        ai_result = await db.chat_messages.insert_one(ai_message_dict)
+        ai_message_dict["id"] = str(ai_result.inserted_id)
+    else:
+        ai_message_dict["id"] = f"temp_ai_{int(time.time() * 1000)}"
+
+    await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": ai_message_dict})
+
+    return {"ok": True, "saved": db_connected, "ai_message": ai_message_dict}
 
 # --- Kanban Endpoints ---
 

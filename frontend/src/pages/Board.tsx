@@ -341,10 +341,13 @@ export default function BoardPage({
       client_nonce: clientNonce,
     });
     try {
-      const response = await apiFetch<{ ok?: boolean }>(`/api/chat/message`, {
+      const response = await apiFetch<{ ok?: boolean; ai_message?: ChatMessage }>(`/api/chat/message`, {
         method: "POST",
         body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce }),
       });
+      if (response.ai_message) {
+        upsertChatMessage(response.ai_message);
+      }
       if (response.ok === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
       }
