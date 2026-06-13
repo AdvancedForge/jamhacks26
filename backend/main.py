@@ -929,15 +929,20 @@ async def send_chat_message(
                     for t in board_data.get("tasks", [])
                 ]
             )
-            roadmap_content = board_data.get("roadmap", "No roadmap content.")
+            # Try to parse the roadmap as JSON, otherwise use as raw text
+            try:
+                roadmap_obj = json.loads(board_data.get("roadmap", "{}"))
+                roadmap_content = json.dumps(roadmap_obj, indent=2)
+            except:
+                roadmap_content = str(board_data.get("roadmap", "{}"))
 
             prompt = (
                 "You are HackBuddy AI, a project board assistant. "
                 "You have access to the project board tasks and the roadmap. "
                 "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
-                'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": "..."}. '
+                'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": {"vision": "...", "phases": {...}}}. '
                 '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
-                '"roadmap" should contain the updated roadmap markdown content if the user requests changes to it, otherwise omit this field. '
+                '"roadmap" should be a JSON object with "vision" (string) and "phases" (dictionary of phase names to lists of task IDs). Only return if changes to vision or phases are requested, otherwise omit. '
                 '"reply" MUST be a direct, relevant answer to the user. '
                 "If the user asks a question, answer it based on the provided tasks and roadmap. "
                 "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
@@ -1002,8 +1007,8 @@ async def send_chat_message(
                         await create_task(chat.room_id, task)
 
             # 2. Handle Roadmap Update
-            if result and "roadmap" in result and isinstance(result["roadmap"], str):
-                await update_roadmap(chat.room_id, {"roadmap": result["roadmap"]})
+            if result and "roadmap" in result and isinstance(result["roadmap"], dict):
+                await update_roadmap(chat.room_id, {"roadmap": json.dumps(result["roadmap"])})
 
             # 3. Handle Reply
             ai_reply = result.get("reply") if result and isinstance(result, dict) else None
