@@ -4,6 +4,7 @@ import random
 import string
 import time
 import traceback
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
@@ -271,6 +272,28 @@ def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
         return None
     return None
 
+def _chunk_chat_reply(text: str, max_chars: int = 28) -> List[str]:
+    if not text:
+        return []
+
+    import re
+
+    tokens = re.findall(r"\S+\s*", text)
+    if not tokens:
+        return [text]
+
+    chunks: List[str] = []
+    current = ""
+    for token in tokens:
+        if current and len(current) + len(token) > max_chars:
+            chunks.append(current)
+            current = token
+            continue
+        current += token
+    if current:
+        chunks.append(current)
+    return chunks or [text]
+
 # --- Chat Endpoints ---
 
 @app.post("/api/chat/message")
@@ -288,6 +311,7 @@ async def send_chat_message(chat: ChatMessage):
 
     # Broadcast chat message even when DB is unavailable.
     await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": message_dict})
+    await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": True})
 
     task_title: Optional[str] = None
 
@@ -320,24 +344,45 @@ async def send_chat_message(chat: ChatMessage):
             ai_reply = f"Got it — I created a task for this: \"{task_title}\"."
         else:
             ai_reply = "Got your message. I can help break this into clear next tasks."
-
+    ai_object_id = ObjectId() if db_connected else None
+    ai_message_id = str(ai_object_id) if ai_object_id else f"temp_ai_{int(time.time() * 1000)}"
     ai_message_dict: Dict[str, Any] = {
+        "id": ai_message_id,
         "room_id": chat.room_id,
         "sender": "HackBuddy AI",
-        "message": ai_reply,
+        "message": "",
         "timestamp": datetime.now().isoformat(),
     }
 
-    if db_connected:
-        ai_result = await db.chat_messages.insert_one(ai_message_dict)
-        ai_message_dict["id"] = str(ai_result.inserted_id)
-        ai_message_dict.pop("_id", None)
-    else:
-        ai_message_dict["id"] = f"temp_ai_{int(time.time() * 1000)}"
+    await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": False})
 
-    await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": ai_message_dict})
+    streamed_message = ""
+    for chunk in _chunk_chat_reply(ai_reply):
+        streamed_message += chunk
+        await manager.broadcast(
+            chat.room_id,
+            {
+                "type": "CHAT_MESSAGE",
+                "message": {**ai_message_dict, "message": streamed_message, "is_streaming": True},
+            },
+        )
+        await asyncio.sleep(0.035)
 
-    return {"ok": True, "saved": db_connected, "ai_message": ai_message_dict}
+    final_ai_message: Dict[str, Any] = {**ai_message_dict, "message": ai_reply, "is_streaming": False}
+
+    if db_connected and ai_object_id is not None:
+        db_ai_message = {
+            "_id": ai_object_id,
+            "room_id": chat.room_id,
+            "sender": "HackBuddy AI",
+            "message": ai_reply,
+            "timestamp": final_ai_message["timestamp"],
+        }
+        await db.chat_messages.insert_one(db_ai_message)
+
+    await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": final_ai_message})
+
+    return {"ok": True, "saved": db_connected}
 
 # --- Kanban Endpoints ---
 

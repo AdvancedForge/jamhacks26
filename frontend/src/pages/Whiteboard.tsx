@@ -1,27 +1,23 @@
-import { useCallback, useEffect, useRef, useState, useContext } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Excalidraw, exportToBlob } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { WS_BASE, apiFetch } from "../hackbuddyApi";
-import type { ToastFn } from "../hackbuddyTypes";
-import { timeAgo } from "../hackbuddyUtils";
-import { RoomContext } from '../context/RoomContext';
+import type { ToastFn, ChatMessage } from "../hackbuddyTypes";
 import { useBoardWebSocket } from '../hooks/useBoardWebSocket';
 import { ChatWindow } from '../components/ChatWindow';
-
-export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
-  const { roomCode } = useContext(RoomContext);
+export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: ToastFn }) {
   type SceneElement = Record<string, unknown>;
   type SceneFiles = Record<string, unknown>;
   type SceneState = { elements: SceneElement[]; files: SceneFiles };
 
-  const [framework, setFramework] = useState<string>("react");
-  const [status, setStatus] = useState<string>("idle");
-  const [code, setCode] = useState<string>("");
+  const [framework] = useState<string>("react");
+  const [, setStatus] = useState<string>("idle");
+  const [, setCode] = useState<string>("");
   const [excalidrawAPI, setExcalidrawAPI] = useState<any>(null);
-  const [syncState, setSyncState] = useState<"connecting" | "live" | "offline">("connecting");
-  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [, setSyncState] = useState<"connecting" | "live" | "offline">("connecting");
+  const [, setLastSyncedAt] = useState<number | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isAiThinking, setIsAiThinking] = useState(false);
 
   const applyingRemoteRef = useRef(false);
@@ -34,23 +30,65 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
   const hasLoadedInitialSceneRef = useRef(false);
   const actorIdRef = useRef(`wb_${Math.random().toString(36).slice(2, 10)}`);
 
-  const handleMessage = useCallback((message: any) => {
-    switch (message.type) {
-      case 'CHAT_MESSAGE':
-        setChatMessages((prev) => [...prev, message.message]);
-        break;
-      case 'CHAT_THINKING':
-        setIsAiThinking(message.status);
-        break;
-    }
+  const upsertChatMessage = useCallback((incoming: ChatMessage) => {
+    setChatMessages((currentMessages) => {
+      const existingIndex = currentMessages.findIndex((message) => {
+        if (incoming.id && message.id === incoming.id) return true;
+        if (incoming.client_nonce && message.client_nonce === incoming.client_nonce) return true;
+        if (
+          incoming.sender === message.sender &&
+          incoming.message === message.message &&
+          incoming.timestamp &&
+          message.timestamp &&
+          incoming.timestamp === message.timestamp
+        ) {
+          return true;
+        }
+        return false;
+      });
+
+      if (existingIndex === -1) return [...currentMessages, incoming];
+      const nextMessages = [...currentMessages];
+      nextMessages[existingIndex] = { ...nextMessages[existingIndex], ...incoming };
+      return nextMessages;
+    });
   }, []);
-  useBoardWebSocket(roomCode || "", handleMessage);
+
+  const handleMessage = useCallback((payload: unknown) => {
+    const event = payload as { type?: string; message?: ChatMessage; status?: boolean };
+    if (event.type === "CHAT_MESSAGE" && event.message) {
+      upsertChatMessage(event.message);
+      return;
+    }
+    if (event.type === "CHAT_THINKING") {
+      setIsAiThinking(Boolean(event.status));
+    }
+  }, [upsertChatMessage]);
+  useBoardWebSocket(roomCode, handleMessage);
   
   const handleSendMessage = async (text: string) => {
-    await apiFetch(`/api/chat/message`, {
-        method: 'POST',
-        body: JSON.stringify({ room_id: roomCode, sender: "You", message: text })
+    const message = text.trim();
+    if (!message) return;
+    const clientNonce = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    upsertChatMessage({
+      sender: "You",
+      message,
+      timestamp: new Date().toISOString(),
+      client_nonce: clientNonce,
     });
+    try {
+      const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
+        method: "POST",
+        body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce }),
+      });
+      if (response.ok === false || response.saved === false) {
+        toast("Chat was queued locally; backend did not persist it.", "warn");
+      }
+    } catch {
+      setChatMessages((currentMessages) => currentMessages.filter((entry) => entry.client_nonce !== clientNonce));
+      setIsAiThinking(false);
+      toast("Failed to send chat message.", "warn");
+    }
   };
 
   const asSceneElement = useCallback((value: unknown): SceneElement | null => {
@@ -430,9 +468,9 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
         reader.onloadend = async () => {
         if (!reader.result || typeof reader.result !== "string") { toast("Analysis export failed.", "error"); return; }
         try {
-            await apiFetch(`/api/whiteboard/analyze`, {
+            await apiFetch(`/api/whiteboard/analyze?room_id=${encodeURIComponent(roomCode)}`, {
             method: "POST",
-            body: JSON.stringify({ room_id: roomCode, image_base64: reader.result }),
+            body: JSON.stringify({ image_base64: reader.result }),
             });
             toast("Feedback sent to chat!");
         } catch { toast("Analysis failed.", "error"); }
@@ -476,7 +514,7 @@ export default function WhiteboardPage({ toast }: { toast: ToastFn }) {
                 </svg>
             </button>
             <div className="w-80 h-full border-l border-white/[0.04] bg-[#08090a]">
-                {isChatOpen && <ChatWindow roomCode={roomCode || ""} messages={chatMessages} onSendMessage={handleSendMessage} isAiThinking={isAiThinking} />}
+                {isChatOpen && <ChatWindow roomCode={roomCode} messages={chatMessages} onSendMessage={handleSendMessage} isAiThinking={isAiThinking} />}
             </div>
         </div>
     </div>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ChatMessage } from '../pages/Board';
+import type { ChatMessage } from '../hackbuddyTypes';
 
 export const ChatWindow = ({ 
     roomCode,
@@ -10,7 +10,7 @@ export const ChatWindow = ({
     roomCode: string,
     messages: ChatMessage[], 
     onSendMessage: (text: string) => void,
-    isAiThinking: boolean 
+    isAiThinking?: boolean 
 }) => {
   const [input, setInput] = useState('');
 
@@ -28,7 +28,7 @@ export const ChatWindow = ({
       </div>
       <div className="flex-grow overflow-y-auto p-4 space-y-3">
         {messages.map((m, i) => (
-          <div key={i} className="text-sm bg-white/[0.03] p-2 rounded-md">
+          <div key={m.id || m.client_nonce || `${m.sender}-${m.timestamp || i}`} className="text-sm bg-white/[0.03] p-2 rounded-md">
             <span className="font-bold text-blue-400">{m.sender === "AI Whiteboard Assistant" ? "HackBuddy" : m.sender}: </span>
             <span className="text-gray-300">{m.message}</span>
           </div>

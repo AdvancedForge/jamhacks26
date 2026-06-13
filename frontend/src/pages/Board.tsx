@@ -29,6 +29,7 @@ export default function BoardPage({
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [isAiThinking, setIsAiThinking] = useState(false);
   const [drawer, setDrawer] = useState<Task | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [retries, setRetries] = useState(0);
@@ -101,9 +102,14 @@ export default function BoardPage({
   }, []);
 
   const handleSocketMessage = useCallback((payload: unknown) => {
-    const event = payload as { type?: string; message?: ChatMessage };
-    if (event.type !== "CHAT_MESSAGE" || !event.message) return;
-    upsertChatMessage(event.message);
+    const event = payload as { type?: string; message?: ChatMessage; status?: boolean };
+    if (event.type === "CHAT_MESSAGE" && event.message) {
+      upsertChatMessage(event.message);
+      return;
+    }
+    if (event.type === "CHAT_THINKING") {
+      setIsAiThinking(Boolean(event.status));
+    }
   }, [upsertChatMessage]);
 
   useBoardWebSocket(roomCode, handleSocketMessage);
@@ -333,18 +339,16 @@ export default function BoardPage({
       client_nonce: clientNonce,
     });
     try {
-      const response = await apiFetch<{ ok?: boolean; ai_message?: ChatMessage }>(`/api/chat/message`, {
+      const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
         body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce }),
       });
-      if (response.ai_message) {
-        upsertChatMessage(response.ai_message);
-      }
-      if (response.ok === false) {
+      if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
       }
     } catch {
       setChatMessages((currentMessages) => currentMessages.filter((entry) => entry.client_nonce !== clientNonce));
+      setIsAiThinking(false);
       toast("Failed to send chat message.", "warn");
     }
   };
@@ -467,7 +471,7 @@ export default function BoardPage({
           </svg>
         </button>
         <div className="w-80 h-full bg-[#08090a] border-l border-white/[0.04]">
-          <ChatWindow roomCode={roomCode} messages={chatMessages} onSendMessage={handleSendMessage} />
+          <ChatWindow roomCode={roomCode} messages={chatMessages} onSendMessage={handleSendMessage} isAiThinking={isAiThinking} />
         </div>
       </div>
     </div>
