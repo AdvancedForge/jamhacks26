@@ -2,23 +2,16 @@ import asyncio
 import logging
 import os
 import random
-import re
 import string
 import time
 import traceback
+import asyncio
 from typing import Any, Dict, List, Optional
-import requests
 
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import (
-    FastAPI,
-    Header,
-    HTTPException,
-    Request,
-    WebSocket,
-    WebSocketDisconnect,
-)
+from fastapi import (FastAPI, HTTPException, Header, Request, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -45,7 +38,7 @@ client = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
 db = client.hackbuddy
 mock_whiteboards: Dict[str, Dict[str, Any]] = {}
 mock_whiteboard_jobs: Dict[str, Dict[str, Any]] = {}
-mock_profiles: Dict[str, Dict[str, Any]] = {}
+mock_profiles: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 
 # Helper to check if DB is connected
@@ -405,26 +398,75 @@ async def _upsert_profile_record(
             {"$set": profile_doc},
             upsert=True,
         )
-    mock_profiles[room_id] = profile_doc
+    if room_id not in mock_profiles:
+        mock_profiles[room_id] = {}
+    mock_profiles[room_id][cleaned_name.lower()] = profile_doc
     return profile_doc
 
 
-async def _get_room_profile(room_id: str) -> Optional[Dict[str, Any]]:
+async def _get_room_members(room_id: str) -> List[Dict[str, Any]]:
     if await is_db_connected():
-        profile = await db.user_profiles.find_one(
-            {"room_id": room_id},
-            sort=[("updated_at", -1)],
+        members = (
+            await db.user_profiles.find({"room_id": room_id})
+            .sort("updated_at", -1)
+            .to_list(length=200)
         )
-        if profile:
-            return {
-                "room_id": room_id,
-                "name": profile.get("name", ""),
-                "skills": profile.get("skills", []),
-                "interest": profile.get("interest", ""),
-                "vibe": profile.get("vibe", ""),
-                "updated_at": profile.get("updated_at"),
-            }
-    return mock_profiles.get(room_id)
+        cleaned_members: List[Dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for member in members:
+            member_name = str(member.get("name", "")).strip()
+            if not member_name:
+                continue
+            normalized_name = member_name.lower()
+            if normalized_name in seen_names:
+                continue
+            seen_names.add(normalized_name)
+            cleaned_members.append(
+                {
+                    "room_id": room_id,
+                    "name": member_name,
+                    "skills": member.get("skills", []),
+                    "interest": member.get("interest", ""),
+                    "vibe": member.get("vibe", ""),
+                    "updated_at": member.get("updated_at"),
+                }
+            )
+        return cleaned_members
+    members_map = mock_profiles.get(room_id, {})
+    return sorted(
+        members_map.values(),
+        key=lambda member: int(member.get("updated_at") or 0),
+        reverse=True,
+    )
+
+
+async def _get_room_profile(
+    room_id: str, preferred_name: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    members = await _get_room_members(room_id)
+    if not members:
+        return None
+    if preferred_name:
+        normalized_preferred = preferred_name.strip().lower()
+        for member in members:
+            if str(member.get("name", "")).strip().lower() == normalized_preferred:
+                return member
+    return members[0]
+
+
+def _normalize_assignee_name(candidate_name: Any, member_names: List[str]) -> Optional[str]:
+    candidate = str(candidate_name or "").strip()
+    if not candidate:
+        return None
+    lowered_candidate = candidate.lower()
+    for member_name in member_names:
+        if member_name.lower() == lowered_candidate:
+            return member_name
+    for member_name in member_names:
+        lowered_member = member_name.lower()
+        if lowered_candidate in lowered_member or lowered_member in lowered_candidate:
+            return member_name
+    return None
 
 
 def _new_mock_whiteboard_job_id() -> str:
@@ -1038,19 +1080,20 @@ async def send_chat_message(
                     for t in board_data.get("tasks", [])
                 ]
             )
-            # Try to parse the roadmap as JSON, otherwise use as raw text
-            try:
-                roadmap_obj = json.loads(board_data.get("roadmap", "{}"))
-                roadmap_content = json.dumps(roadmap_obj, indent=2)
-            except:
-                roadmap_content = str(board_data.get("roadmap", "{}"))
-            
-            profile = await _get_room_profile(chat.room_id)
+            roadmap_content = board_data.get("roadmap", "No roadmap content.")
+            room_members = await _get_room_members(chat.room_id)
+            profile = await _get_room_profile(chat.room_id, chat.sender)
             profile_summary = (
                 _build_profile_summary(profile)
                 if profile
                 else "No onboarding profile has been provided yet."
             )
+            member_names = [
+                str(member.get("name", "")).strip()
+                for member in room_members
+                if str(member.get("name", "")).strip()
+            ]
+            member_summary = ", ".join(member_names) if member_names else "No known members yet."
 
             prompt = (
                 "You are HackBuddy AI, a project board assistant. "
@@ -1060,6 +1103,7 @@ async def send_chat_message(
                 '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
                 '"roadmap" should be a JSON object with "vision" (string) and "phases" (dictionary of phase names to lists of task IDs). Only return if changes to vision or phases are requested, otherwise omit. '
                 '"reply" MUST be a direct, relevant answer to the user. '
+                'When setting "assignee" for tasks, use ONLY names from the provided team member list. '
                 "If the user asks a question, answer it based on the provided tasks and roadmap. "
                 "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
                 "If the request is unclear, politely ask for clarification. "
@@ -1071,6 +1115,7 @@ async def send_chat_message(
                 f"{prompt}\n\n"
                 f"--- Context ---\n"
                 f"User profile: {profile_summary}\n"
+                f"Team members (valid assignees): {member_summary}\n"
                 f"Whiteboard: {whiteboard_summary}\n"
                 f"Whiteboard image context: {whiteboard_image_hint}\n"
                 f"Tasks:\n{tasks_summary}\n"
@@ -1100,7 +1145,15 @@ async def send_chat_message(
 
             # 1. Handle Tasks
             if result and "tasks" in result and isinstance(result["tasks"], list):
+                member_names_for_assignment = [
+                    str(member.get("name", "")).strip()
+                    for member in room_members
+                    if str(member.get("name", "")).strip()
+                ]
                 for task_data in result["tasks"]:
+                    normalized_assignee = _normalize_assignee_name(
+                        task_data.get("assignee"), member_names_for_assignment
+                    )
                     # Check if it's an update (has id) or create
                     if "id" in task_data:
                         # Logic to update existing task
@@ -1108,7 +1161,7 @@ async def send_chat_message(
                             title=str(task_data.get("title") or "Untitled Task"),
                             description=str(task_data.get("description") or ""),
                             column=str(task_data.get("column") or "Backlog"),
-                            assignee=str(task_data.get("assignee") or ""),
+                            assignee=normalized_assignee or "",
                             updated_at=int(time.time() * 1000),
                         )
                         await update_task(chat.room_id, task_data["id"], task)
@@ -1118,7 +1171,7 @@ async def send_chat_message(
                             title=str(task_data.get("title") or "Untitled Task"),
                             description=str(task_data.get("description") or ""),
                             column=str(task_data.get("column") or "Backlog"),
-                            assignee=str(task_data.get("assignee") or ""),
+                            assignee=normalized_assignee or "",
                             created_at=int(time.time() * 1000),
                         )
                         await create_task(chat.room_id, task)
@@ -1208,8 +1261,13 @@ async def upsert_profile(payload: UserProfilePayload):
 
 
 @app.get("/api/profile/{room_id}")
-async def get_profile(room_id: str):
-    return {"profile": await _get_room_profile(room_id)}
+async def get_profile(room_id: str, name: Optional[str] = None):
+    return {"profile": await _get_room_profile(room_id, name)}
+
+
+@app.get("/api/profile/members/{room_id}")
+async def get_profile_members(room_id: str):
+    return {"members": await _get_room_members(room_id)}
 
 
 @app.post("/api/profile/ideas")

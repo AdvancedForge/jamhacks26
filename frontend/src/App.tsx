@@ -82,7 +82,14 @@ export default function App() {
       <Topbar roomCode={roomCode} page={page} onNav={handleNav} polledAt={polledAt} />
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {page === "Kanban" && <BoardPage roomCode={roomCode} toast={toast} onPoll={handlePoll} />}
+        {page === "Kanban" && (
+          <BoardPage
+            roomCode={roomCode}
+            toast={toast}
+            onPoll={handlePoll}
+            currentUserName={profile?.name}
+          />
+        )}
         {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
         {page === "Integrations" && (
           <IntegrationsPage

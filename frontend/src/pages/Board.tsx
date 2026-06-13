@@ -45,12 +45,15 @@ export default function BoardPage({
   roomCode,
   toast,
   onPoll,
+  currentUserName,
 }: {
   roomCode: string;
   toast: ToastFn;
   onPoll?: () => void;
+  currentUserName?: string;
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [memberNames, setMemberNames] = useState<string[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [selectedModel, setSelectedModel] = useState(
@@ -214,6 +217,33 @@ export default function BoardPage({
     return () => window.clearTimeout(timer);
   }, [fetchChatHistory]);
 
+  const fetchMembers = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ members?: Array<{ name?: string }> }>(
+        `/api/profile/members/${roomCode}`,
+      );
+      const names = (data.members || [])
+        .map((member) => (member?.name || "").trim())
+        .filter((name): name is string => Boolean(name));
+      setMemberNames(Array.from(new Set(names)));
+    } catch {
+      // no-op
+    }
+  }, [roomCode]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      fetchMembers().catch(() => {});
+    }, 0);
+    const interval = window.setInterval(() => {
+      fetchMembers().catch(() => {});
+    }, 5000);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(interval);
+    };
+  }, [fetchMembers]);
+
 
   const fetchBoard = useCallback(async () => {
     try {
@@ -241,14 +271,14 @@ export default function BoardPage({
     if (retries >= 15) toast("Lost connection. Showing stale data.", "error");
   }, [retries, toast]);
 
-  const handleAdd = async ({ title, description, column }: CreateTaskInput) => {
+  const handleAdd = async ({ title, description, column, assignee }: CreateTaskInput) => {
     const now = Date.now();
     const optimistic: Task = {
       id: `t_${Math.random().toString(36).slice(2, 7)}`,
       title,
       description,
       column,
-      assignee: "",
+      assignee: assignee?.trim() || "",
       created_at: now,
       updated_at: now,
     };
@@ -256,7 +286,7 @@ export default function BoardPage({
     try {
       await apiFetch(`/api/task/create?room_id=${roomCode}`, {
         method: "POST",
-        body: JSON.stringify({ title, description, column, assignee: "", created_at: now }),
+        body: JSON.stringify({ title, description, column, assignee: assignee?.trim() || "", created_at: now }),
       });
       toast(`Task added to ${column}`);
       fetchBoard().catch(() => {});
@@ -447,7 +477,7 @@ export default function BoardPage({
     }
     const clientNonce = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     upsertChatMessage({
-      sender: "You",
+      sender: currentUserName?.trim() || "You",
       message,
       timestamp: new Date().toISOString(),
       client_nonce: clientNonce,
@@ -456,7 +486,13 @@ export default function BoardPage({
       const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
         headers: { "X-Gemini-Model": selectedModel },
-        body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce, model: selectedModel }),
+        body: JSON.stringify({
+          room_id: roomCode,
+          sender: currentUserName?.trim() || "You",
+          message,
+          client_nonce: clientNonce,
+          model: selectedModel,
+        }),
       });
       if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
@@ -561,6 +597,7 @@ export default function BoardPage({
               key={columnName}
               col={columnName}
               tasks={colTasks(columnName)}
+              memberNames={memberNames}
               onAdd={handleAdd}
               onOpen={setDrawer}
               activeTaskId={activeTaskId}
@@ -569,7 +606,15 @@ export default function BoardPage({
         </div>
         <DragOverlay dropAnimation={null}>{activeTask ? <DragTaskCardPreview task={activeTask} /> : null}</DragOverlay>
       </DndContext>
-      {drawer && <TaskDrawer task={drawer} onClose={() => setDrawer(null)} onSave={handleSave} onDelete={handleDelete} />}
+      {drawer && (
+        <TaskDrawer
+          task={drawer}
+          memberNames={memberNames}
+          onClose={() => setDrawer(null)}
+          onSave={handleSave}
+          onDelete={handleDelete}
+        />
+      )}
 
       <div
         className={`absolute top-0 right-0 h-full w-80 z-40 transition-transform duration-300 ease-in-out ${

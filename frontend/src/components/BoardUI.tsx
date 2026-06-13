@@ -8,7 +8,7 @@ import { hashColor } from "../hackbuddyUtils";
 export const COLUMNS = ["Backlog", "In Progress", "Done"] as const;
 const COL_COLOR = { Backlog: "#71717a", "In Progress": "#f59e0b", Done: "#22c55e" } as const;
 
-export type CreateTaskInput = { title: string; description: string; column: string };
+export type CreateTaskInput = { title: string; description: string; column: string; assignee?: string };
 
 function TaskCardContent({ task }: { task: Task }) {
   return (
@@ -86,15 +86,18 @@ function Card({
 
 function InlineForm({
   column,
+  memberNames,
   onAdd,
   onCancel,
 }: {
   column: string;
+  memberNames: string[];
   onAdd: (data: CreateTaskInput) => void;
   onCancel: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
+  const [assignee, setAssignee] = useState("");
   const ref = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -103,7 +106,7 @@ function InlineForm({
 
   const submit = () => {
     if (!title.trim()) return;
-    onAdd({ title: title.trim(), description: desc.trim(), column });
+    onAdd({ title: title.trim(), description: desc.trim(), assignee: assignee.trim(), column });
   };
 
   return (
@@ -126,6 +129,18 @@ function InlineForm({
         rows={2}
         className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-lg px-3 py-2.5 text-[13px] text-white placeholder-[#52525b] outline-none resize-none transition-all"
       />
+      <input
+        value={assignee}
+        onChange={(event) => setAssignee(event.target.value)}
+        list={`assignees-${column}`}
+        placeholder="Assignee (optional)"
+        className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-lg px-3 py-2.5 text-[13px] text-white placeholder-[#52525b] outline-none transition-all"
+      />
+      <datalist id={`assignees-${column}`}>
+        {memberNames.map((memberName) => (
+          <option key={memberName} value={memberName} />
+        ))}
+      </datalist>
       <div className="flex gap-2 justify-end">
         <button
           onClick={onCancel}
@@ -156,12 +171,14 @@ export function DragTaskCardPreview({ task }: { task: Task }) {
 export function Column({
   col,
   tasks,
+  memberNames,
   onAdd,
   onOpen,
   activeTaskId,
 }: {
   col: string;
   tasks: Task[];
+  memberNames: string[];
   onAdd: (data: CreateTaskInput) => void;
   onOpen: (task: Task) => void;
   activeTaskId: string | null;
@@ -211,6 +228,7 @@ export function Column({
         {adding ? (
           <InlineForm
             column={col}
+            memberNames={memberNames}
             onAdd={(data) => {
               onAdd(data);
               setAdding(false);
@@ -235,11 +253,13 @@ export function Column({
 
 export function TaskDrawer({
   task,
+  memberNames,
   onClose,
   onSave,
   onDelete,
 }: {
   task: Task;
+  memberNames: string[];
   onClose: () => void;
   onSave: (task: Task) => void;
   onDelete: (id: string) => void;
@@ -307,10 +327,16 @@ export function TaskDrawer({
               <input
                 value={assignee}
                 onChange={(event) => setAssignee(event.target.value)}
+                list={`drawer-assignees-${task.id}`}
                 onBlur={save}
                 placeholder="Name…"
                 className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
               />
+              <datalist id={`drawer-assignees-${task.id}`}>
+                {memberNames.map((memberName) => (
+                  <option key={memberName} value={memberName} />
+                ))}
+              </datalist>
             </div>
           </div>
 
