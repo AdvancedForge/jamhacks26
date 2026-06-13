@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { apiFetch } from "../hackbuddyApi";
 import type { Task, ToastFn } from "../hackbuddyTypes";
 
@@ -9,6 +9,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [isEditing, setIsEditing] = useState(true);
+  const previewRef = useRef<HTMLDivElement>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -25,6 +26,33 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
     fetchData();
   }, [fetchData]);
 
+  // Load marked.js
+  useEffect(() => {
+    if ((window as any).marked) return;
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
+    script.async = true;
+    script.onload = () => {
+        // Configure marked - gfm: true should handle **bold** correctly
+        (window as any).marked.setOptions({
+            breaks: true,
+            gfm: true,
+        });
+        // Trigger re-render
+        if (!isEditing && previewRef.current && (window as any).marked) {
+            previewRef.current.innerHTML = (window as any).marked.parse(roadmap);
+        }
+    };
+    document.body.appendChild(script);
+    return () => { document.body.removeChild(script); };
+  }, []);
+
+  useEffect(() => {
+    if (!isEditing && previewRef.current && (window as any).marked) {
+      previewRef.current.innerHTML = (window as any).marked.parse(roadmap);
+    }
+  }, [isEditing, roadmap]);
+
   const saveRoadmap = async (newContent: string) => {
     setRoadmap(newContent);
     try {
@@ -37,18 +65,9 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
     }
   };
 
-  // Simple Markdown renderer
-  const renderMarkdown = (text: string) => {
-    return text
-      .replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold mb-2">$1</h1>')
-      .replace(/^## (.*$)/gim, '<h2 class="text-xl font-bold mb-2">$1</h2>')
-      .replace(/^- (.*$)/gim, '<li class="ml-4">$1</li>')
-      .replace(/\n/gim, '<br />');
-  };
-
   return (
-    <div className="p-6 h-full overflow-y-auto">
-      <div className="flex justify-between items-center mb-4">
+    <div className="p-6 h-full flex flex-col">
+      <div className="flex justify-between items-center mb-4 flex-none">
         <h2 className="text-xl font-bold">Roadmap</h2>
         <button
           onClick={() => setIsEditing(!isEditing)}
@@ -60,19 +79,19 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
       {loading ? (
         <p>Loading...</p>
       ) : (
-        <div className="flex gap-6">
-          <div className="w-1/2 h-[500px] p-4 bg-[#0a0b0d] border border-white/10 rounded-lg text-white font-mono overflow-y-auto">
+        <div className="flex gap-6 flex-1 min-h-0">
+          <div className="w-1/2 h-full bg-[#0a0b0d] border border-white/10 rounded-lg text-white overflow-hidden">
             {isEditing ? (
               <textarea
-                className="w-full h-full bg-transparent outline-none"
+                className="w-full h-full p-4 bg-transparent outline-none resize-none"
                 value={roadmap}
                 onChange={(e) => saveRoadmap(e.target.value)}
               />
             ) : (
-              <div dangerouslySetInnerHTML={{ __html: renderMarkdown(roadmap) }} />
+              <div ref={previewRef} className="prose prose-invert max-w-none p-4 w-full h-full overflow-y-auto" />
             )}
           </div>
-          <div className="w-1/2 p-4 bg-[#0a0b0d] border border-white/10 rounded-lg text-white overflow-y-auto h-[500px]">
+          <div className="w-1/2 h-full p-4 bg-[#0a0b0d] border border-white/10 rounded-lg text-white overflow-y-auto">
             <h3 className="font-bold mb-2">Live Tasks Status</h3>
             {tasks.map((task) => (
               <div key={task.id} className="flex items-center gap-2 mb-2">
