@@ -431,7 +431,7 @@ export default function BoardPage({
 
       <div
         className={`absolute top-0 right-0 h-full w-80 z-40 transition-transform duration-300 ease-in-out ${
-          isChatOpen ? "translate-x-0" : "translate-x-[280px]"
+          isChatOpen ? "translate-x-0" : "translate-x-full"
         }`}
       >
         <button
@@ -440,7 +440,7 @@ export default function BoardPage({
           aria-label={isChatOpen ? "Close chat sidebar" : "Open chat sidebar"}
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isChatOpen ? "M15 19l-7-7 7-7" : "M9 5l7 7-7 7"} />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isChatOpen ? "M9 5l7 7-7 7" : "M15 19l-7-7 7-7"} />
           </svg>
         </button>
         <div className="w-80 h-full bg-[#08090a] border-l border-white/[0.04]">
