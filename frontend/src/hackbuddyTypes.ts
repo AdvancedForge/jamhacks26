@@ -21,6 +21,13 @@ export interface ChatMessage {
   model?: string;
 }
 
+export type OnboardingProfile = {
+  name: string;
+  skills: string[];
+  interest: string;
+  vibe: string;
+};
+
 export type Task = {
   id: string;
   title: string;

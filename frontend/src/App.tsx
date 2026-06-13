@@ -3,23 +3,50 @@ import EntryScreen from "./components/EntryScreen";
 import ToastList from "./components/ToastList";
 import Topbar from "./components/Topbar";
 import { useToasts } from "./hooks/useToasts";
-import type { AppPage } from "./hackbuddyTypes";
+import type { AppPage, OnboardingProfile } from "./hackbuddyTypes";
 import BoardPage from "./pages/Board";
 import WhiteboardPage from "./pages/Whiteboard";
 import IntegrationsPage from "./pages/Integrations";
 
 import RoadmapPage from "./pages/Roadmap";
+const PROFILE_STORAGE_KEY = "hb_profile";
+
+const readStoredProfile = (): OnboardingProfile | null => {
+  try {
+    const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<OnboardingProfile>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    const interest = typeof parsed.interest === "string" ? parsed.interest.trim() : "";
+    const vibe = typeof parsed.vibe === "string" ? parsed.vibe.trim() : "";
+    const skills = Array.isArray(parsed.skills)
+      ? parsed.skills.map((skill) => String(skill).trim()).filter(Boolean)
+      : [];
+    if (!name || !interest || !vibe) return null;
+    return { name, interest, vibe, skills };
+  } catch {
+    return null;
+  }
+};
 
 export default function App() {
   const [roomCode, setRoomCode] = useState(() => localStorage.getItem("hb_room") || "");
   const [page, setPage] = useState<AppPage>(() => (localStorage.getItem("hb_page") as AppPage) || "Kanban");
+  const [profile, setProfile] = useState<OnboardingProfile | null>(() => readStoredProfile());
   const [polledAt, setPolledAt] = useState(Date.now());
   const { toasts, add: toast } = useToasts();
   const handlePoll = useCallback(() => setPolledAt(Date.now()), []);
-
-  const handleEnter = (code: string) => {
+  const handleEnter = (code: string, onboardingProfile: OnboardingProfile) => {
     setRoomCode(code);
     setPage("Kanban");
+    setProfile(onboardingProfile);
+    localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(onboardingProfile));
+  };
+
+  const handleProfileUpdate = (nextProfile: OnboardingProfile) => {
+    setProfile(nextProfile);
+    localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(nextProfile));
   };
 
   const handleNav = (newPage: AppPage) => {
@@ -57,7 +84,14 @@ export default function App() {
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
         {page === "Kanban" && <BoardPage roomCode={roomCode} toast={toast} onPoll={handlePoll} />}
         {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
-        {page === "Integrations" && <IntegrationsPage roomCode={roomCode} toast={toast} />}
+        {page === "Integrations" && (
+          <IntegrationsPage
+            roomCode={roomCode}
+            toast={toast}
+            profile={profile}
+            onProfileChange={handleProfileUpdate}
+          />
+        )}
         {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
       </main>
 

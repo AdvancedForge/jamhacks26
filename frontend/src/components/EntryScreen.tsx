@@ -1,37 +1,95 @@
 import { useState } from "react";
 import { apiFetch } from "../hackbuddyApi";
 import { genRoomCode } from "../hackbuddyUtils";
+import type { OnboardingProfile } from "../hackbuddyTypes";
 
-export default function EntryScreen({ onEnter }: { onEnter: (code: string) => void }) {
+const parseSkills = (skillsInput: string) =>
+  skillsInput
+    .split(",")
+    .map((skill) => skill.trim())
+    .filter(Boolean);
+
+export default function EntryScreen({ onEnter }: { onEnter: (code: string, profile: OnboardingProfile) => void }) {
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [name, setName] = useState("");
+  const [skillsInput, setSkillsInput] = useState("");
+  const [interest, setInterest] = useState("");
+  const [vibe, setVibe] = useState("");
+
+  const buildProfile = (): OnboardingProfile => ({
+    name: name.trim(),
+    skills: parseSkills(skillsInput),
+    interest: interest.trim(),
+    vibe: vibe.trim(),
+  });
+
+  const validateProfile = (profile: OnboardingProfile) => {
+    if (!profile.name) return "Name is required.";
+    if (profile.skills.length === 0) return "Add at least one skill.";
+    if (!profile.interest) return "Interest is required.";
+    if (!profile.vibe) return "Vibe is required.";
+    return "";
+  };
+
+  const saveProfile = async (roomId: string, profile: OnboardingProfile) => {
+    localStorage.setItem("hb_profile", JSON.stringify(profile));
+    try {
+      await apiFetch("/api/profile/upsert", {
+        method: "POST",
+        body: JSON.stringify({
+          room_id: roomId,
+          name: profile.name,
+          skills: profile.skills,
+          interest: profile.interest,
+          vibe: profile.vibe,
+        }),
+      });
+    } catch {
+      // non-blocking fallback: profile still stored locally
+    }
+  };
 
   const handleCreate = async () => {
+    const profile = buildProfile();
+    const validationError = validateProfile(profile);
+    if (validationError) {
+      setErr(validationError);
+      return;
+    }
     setLoading(true);
     setErr("");
     try {
       const data = await apiFetch<{ room_id: string }>("/api/room/create", { method: "POST" });
       const roomId = data.room_id;
       localStorage.setItem("hb_room", roomId);
-      onEnter(roomId);
+      await saveProfile(roomId, profile);
+      onEnter(roomId, profile);
     } catch {
       const roomId = genRoomCode();
       localStorage.setItem("hb_room", roomId);
-      onEnter(roomId);
+      await saveProfile(roomId, profile);
+      onEnter(roomId, profile);
     } finally {
       setLoading(false);
     }
   };
-
-  const handleJoin = () => {
+  const handleJoin = async () => {
+    const profile = buildProfile();
+    const validationError = validateProfile(profile);
+    if (validationError) {
+      setErr(validationError);
+      return;
+    }
     const trimmed = code.trim().toUpperCase();
     if (trimmed.length < 4) {
       setErr("Enter at least 4 characters.");
       return;
     }
     localStorage.setItem("hb_room", trimmed);
-    onEnter(trimmed);
+    await saveProfile(trimmed, profile);
+    onEnter(trimmed, profile);
   };
 
   return (
@@ -58,6 +116,45 @@ export default function EntryScreen({ onEnter }: { onEnter: (code: string) => vo
         </div>
 
         <div className="bg-[#0f1012]/80 backdrop-blur-xl border border-white/[0.06] rounded-2xl p-8 flex flex-col gap-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_50px_rgba(0,0,0,0.5)]">
+          <div className="grid gap-3">
+            <label className="text-[11px] uppercase tracking-wider text-[#52525b] font-medium">Onboarding profile</label>
+            <input
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setErr("");
+              }}
+              placeholder="Name"
+              className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+            />
+            <input
+              value={skillsInput}
+              onChange={(e) => {
+                setSkillsInput(e.target.value);
+                setErr("");
+              }}
+              placeholder="Skills (comma separated)"
+              className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+            />
+            <input
+              value={interest}
+              onChange={(e) => {
+                setInterest(e.target.value);
+                setErr("");
+              }}
+              placeholder="Interest (what you want to build)"
+              className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+            />
+            <input
+              value={vibe}
+              onChange={(e) => {
+                setVibe(e.target.value);
+                setErr("");
+              }}
+              placeholder="Vibe (e.g. chill, competitive, experimental)"
+              className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+            />
+          </div>
           <button
             onClick={handleCreate}
             disabled={loading}
@@ -86,7 +183,7 @@ export default function EntryScreen({ onEnter }: { onEnter: (code: string) => vo
                 setCode(e.target.value);
                 setErr("");
               }}
-              onKeyDown={(e) => e.key === "Enter" && handleJoin()}
+              onKeyDown={(e) => e.key === "Enter" && void handleJoin()}
               placeholder="Room code"
               className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all font-mono"
             />
