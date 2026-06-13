@@ -18,6 +18,7 @@ export interface ChatMessage {
   timestamp?: string;
   client_nonce?: string;
   is_streaming?: boolean;
+  model?: string;
 }
 
 export type Task = {

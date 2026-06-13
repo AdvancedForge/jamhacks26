@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import (FastAPI, HTTPException, Request, WebSocket,
+from fastapi import (FastAPI, HTTPException, Header, Request, WebSocket,
                      WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
 from fastapi.responses import JSONResponse
@@ -229,6 +229,7 @@ class ChatMessage(BaseModel):
     sender: str
     message: str
     client_nonce: Optional[str] = None
+    model: Optional[str] = None
 
 import base64
 
@@ -236,17 +237,52 @@ import google.generativeai as genai
 
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemma-4-31b-it')
+DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_GEMINI_MODEL", "gemma-4-31b-it")
+SUPPORTED_CHAT_MODELS = [
+    "gemma-4-31b-it",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
+CHAT_SYSTEM_INSTRUCTION = (
+    "You are HackBuddy AI, a friendly and helpful project board assistant. "
+    "Your task is to reply conversationally to the user message in 1 to 3 short sentences. "
+    "If they ask for concrete work, suggest actionable next steps. "
+    "CRITICAL: Do NOT output any chain-of-thought, thinking process, planning, "
+    "role descriptions, or bullet points. Output ONLY the direct response to the user."
+)
+model = genai.GenerativeModel(DEFAULT_CHAT_MODEL)
 chat_model = genai.GenerativeModel(
-    'gemma-4-31b-it',
+    DEFAULT_CHAT_MODEL,
     system_instruction=(
-        "You are HackBuddy AI, a friendly and helpful project board assistant. "
-        "Your task is to reply conversationally to the user message in 1 to 3 short sentences. "
-        "If they ask for concrete work, suggest actionable next steps. "
-        "CRITICAL: Do NOT output any chain-of-thought, thinking process, planning, "
-        "role descriptions, or bullet points. Output ONLY the direct response to the user."
+        CHAT_SYSTEM_INSTRUCTION
     )
 )
+
+def _resolve_chat_model_name(model_name: Optional[str]) -> str:
+    import re
+
+    candidate = (model_name or "").strip()
+    if not candidate:
+        return DEFAULT_CHAT_MODEL
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", candidate):
+        return DEFAULT_CHAT_MODEL
+    if candidate not in SUPPORTED_CHAT_MODELS:
+        return DEFAULT_CHAT_MODEL
+    return candidate
+
+def _create_chat_models(model_name: Optional[str]) -> tuple[str, Any, Any]:
+    resolved_model = _resolve_chat_model_name(model_name)
+    try:
+        return (
+            resolved_model,
+            genai.GenerativeModel(resolved_model),
+            genai.GenerativeModel(resolved_model, system_instruction=CHAT_SYSTEM_INSTRUCTION),
+        )
+    except Exception as error:
+        logger.warning(f"Could not initialize Gemini model '{resolved_model}': {error}")
+        return DEFAULT_CHAT_MODEL, model, chat_model
 
 def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
     if not raw_text:
@@ -385,14 +421,49 @@ def _safe_chat_fallback(user_message: str, task_title: Optional[str] = None) -> 
     return "Got your message. I can help break this into clear next tasks."
 
 # --- Chat Endpoints ---
+@app.get("/api/chat/models")
+async def get_chat_models():
+    return {"models": SUPPORTED_CHAT_MODELS, "default_model": DEFAULT_CHAT_MODEL}
+
+@app.get("/api/chat/messages/{room_id}")
+async def get_chat_messages(room_id: str):
+    if not await is_db_connected():
+        return {"messages": [], "saved": False}
+
+    messages = (
+        await db.chat_messages.find({"room_id": room_id})
+        .sort("timestamp", 1)
+        .to_list(length=500)
+    )
+    cleaned_messages: List[Dict[str, Any]] = []
+    for message in messages:
+        cleaned_messages.append(
+            {
+                "id": str(message.get("_id")),
+                "room_id": message.get("room_id"),
+                "sender": message.get("sender", ""),
+                "message": message.get("message", ""),
+                "timestamp": message.get("timestamp"),
+                "client_nonce": message.get("client_nonce"),
+                "model": message.get("model"),
+                "is_streaming": False,
+            }
+        )
+    return {"messages": cleaned_messages, "saved": True}
 
 @app.post("/api/chat/message")
 async def send_chat_message(
     chat: ChatMessage, 
-    x_gemini_api_key: Optional[str] = Header(None)
+    x_gemini_api_key: Optional[str] = Header(None),
+    x_gemini_model: Optional[str] = Header(None),
 ):
+    custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
+    if custom_key:
+        genai.configure(api_key=custom_key)
+    selected_model, intent_model, reply_model = _create_chat_models(chat.model or x_gemini_model)
     db_connected = await is_db_connected()
     message_dict = chat.model_dump(exclude_none=True)
+    message_dict["model"] = selected_model
     message_dict["timestamp"] = datetime.now().isoformat()
 
     if db_connected:
@@ -410,17 +481,12 @@ async def send_chat_message(
 
     # Intent detection for task creation
     try:
-        # Override key if custom one provided
-        custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
-        genai.configure(api_key=custom_key)
-        
-        # ... (rest of the logic remains largely the same)
         intent_prompt = (
             f"Analyze this user message: '{chat.message}'. "
             'If the user wants to create a task, return ONLY valid JSON like {"action":"create_task","title":"..."}; '
             'otherwise return {"action":"ignore"}.'
         )
-        intent_response = await model.generate_content_async(intent_prompt)
+        intent_response = await intent_model.generate_content_async(intent_prompt)
         intent = _extract_json_object((intent_response.text or "").strip())
         if intent and intent.get("action") == "create_task":
             task_title = str(intent.get("title") or "").strip()
@@ -440,7 +506,7 @@ async def send_chat_message(
             "Do NOT output analysis, planning, role labels, bullet points, or any text like "
             "\"User says\", \"Role\", or \"Constraints\"."
         )
-        reply_response = await chat_model.generate_content_async(reply_prompt)
+        reply_response = await reply_model.generate_content_async(reply_prompt)
         ai_reply = _sanitize_chat_reply((reply_response.text or "").strip(), chat.message)
     except Exception as e:
         logger.warning(f"AI reply warning: {e}")
@@ -455,6 +521,7 @@ async def send_chat_message(
         "sender": "HackBuddy AI",
         "message": "",
         "timestamp": datetime.now().isoformat(),
+        "model": selected_model,
     }
 
     await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": False})
@@ -480,12 +547,13 @@ async def send_chat_message(
             "sender": "HackBuddy AI",
             "message": ai_reply,
             "timestamp": final_ai_message["timestamp"],
+            "model": selected_model,
         }
         await db.chat_messages.insert_one(db_ai_message)
 
     await manager.broadcast(chat.room_id, {"type": "CHAT_MESSAGE", "message": final_ai_message})
 
-    return {"ok": True, "saved": db_connected}
+    return {"ok": True, "saved": db_connected, "model": selected_model}
 
 # --- Kanban Endpoints ---
 

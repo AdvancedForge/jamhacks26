@@ -5,6 +5,24 @@ import { WS_BASE, apiFetch } from "../hackbuddyApi";
 import type { ToastFn, ChatMessage } from "../hackbuddyTypes";
 import { useBoardWebSocket } from '../hooks/useBoardWebSocket';
 import { ChatWindow } from '../components/ChatWindow';
+const CHAT_MODEL_STORAGE_KEY = "hackpilot_chat_model";
+const FALLBACK_CHAT_MODELS = ["gemma-4-31b-it", "gemini-2.5-flash", "gemini-2.5-pro"];
+
+type ChatModelOption = {
+  value: string;
+  label: string;
+};
+
+const formatModelLabel = (modelName: string) =>
+  modelName
+    .split("-")
+    .map((segment) => {
+      if (!segment) return segment;
+      if (/^\d+(?:\.\d+)?$/.test(segment)) return segment;
+      if (segment.length <= 3) return segment.toUpperCase();
+      return segment[0].toUpperCase() + segment.slice(1);
+    })
+    .join(" ");
 export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: ToastFn }) {
   type SceneElement = Record<string, unknown>;
   type SceneFiles = Record<string, unknown>;
@@ -19,6 +37,13 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isAiThinking, setIsAiThinking] = useState(false);
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || FALLBACK_CHAT_MODELS[0]);
+  const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>(
+    FALLBACK_CHAT_MODELS.map((modelName) => ({
+      value: modelName,
+      label: formatModelLabel(modelName),
+    })),
+  );
 
   const applyingRemoteRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
@@ -30,9 +55,10 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
   const hasLoadedInitialSceneRef = useRef(false);
   const actorIdRef = useRef(`wb_${Math.random().toString(36).slice(2, 10)}`);
 
-  const upsertChatMessage = useCallback((incoming: ChatMessage) => {
-    setChatMessages((currentMessages) => {
-      const existingIndex = currentMessages.findIndex((message) => {
+  const mergeChatMessages = useCallback((currentMessages: ChatMessage[], incomingMessages: ChatMessage[]) => {
+    const nextMessages = [...currentMessages];
+    for (const incoming of incomingMessages) {
+      const existingIndex = nextMessages.findIndex((message) => {
         if (incoming.id && message.id === incoming.id) return true;
         if (incoming.client_nonce && message.client_nonce === incoming.client_nonce) return true;
         if (
@@ -47,12 +73,23 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
         return false;
       });
 
-      if (existingIndex === -1) return [...currentMessages, incoming];
-      const nextMessages = [...currentMessages];
+      if (existingIndex === -1) {
+        nextMessages.push(incoming);
+        continue;
+      }
       nextMessages[existingIndex] = { ...nextMessages[existingIndex], ...incoming };
-      return nextMessages;
+    }
+
+    return nextMessages.sort((left, right) => {
+      const leftTime = left.timestamp || "";
+      const rightTime = right.timestamp || "";
+      return leftTime.localeCompare(rightTime);
     });
   }, []);
+
+  const upsertChatMessage = useCallback((incoming: ChatMessage) => {
+    setChatMessages((currentMessages) => mergeChatMessages(currentMessages, [incoming]));
+  }, [mergeChatMessages]);
 
   const handleMessage = useCallback((payload: unknown) => {
     const event = payload as { type?: string; message?: ChatMessage; status?: boolean };
@@ -65,6 +102,58 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
     }
   }, [upsertChatMessage]);
   useBoardWebSocket(roomCode, handleMessage);
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_MODEL_STORAGE_KEY, selectedModel);
+  }, [selectedModel]);
+
+  const fetchChatModels = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`);
+      const modelNames = (data.models || []).filter((modelName) => modelName.trim().length > 0);
+      if (modelNames.length === 0) return;
+      const options = modelNames.map((modelName) => ({
+        value: modelName,
+        label: formatModelLabel(modelName),
+      }));
+      setChatModelOptions(options);
+      setSelectedModel((currentModel) => {
+        if (modelNames.includes(currentModel)) return currentModel;
+        if (data.default_model && modelNames.includes(data.default_model)) return data.default_model;
+        return modelNames[0];
+      });
+    } catch {
+      // Fallback to static model list.
+    }
+  }, []);
+
+  const fetchChatHistory = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ messages?: ChatMessage[]; saved?: boolean }>(`/api/chat/messages/${roomCode}`);
+      const incomingMessages = (data.messages || []).map((message) => ({ ...message, is_streaming: false }));
+      setChatMessages(incomingMessages);
+      setIsAiThinking(false);
+      if (data.saved === false) {
+        toast("Chat history could not be loaded from MongoDB.", "warn");
+      }
+    } catch {
+      // Keep chat live-only if history cannot be loaded.
+    }
+  }, [roomCode, toast]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      fetchChatModels().catch(() => {});
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchChatModels]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      fetchChatHistory().catch(() => {});
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchChatHistory]);
   
   const handleSendMessage = async (text: string) => {
     const message = text.trim();
@@ -79,7 +168,8 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
     try {
       const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
-        body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce }),
+        headers: { "X-Gemini-Model": selectedModel },
+        body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce, model: selectedModel }),
       });
       if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
@@ -514,7 +604,17 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
                 </svg>
             </button>
             <div className="w-80 h-full border-l border-white/[0.04] bg-[#08090a]">
-                {isChatOpen && <ChatWindow roomCode={roomCode} messages={chatMessages} onSendMessage={handleSendMessage} isAiThinking={isAiThinking} />}
+                {isChatOpen && (
+                  <ChatWindow
+                    roomCode={roomCode}
+                    messages={chatMessages}
+                    onSendMessage={handleSendMessage}
+                    isAiThinking={isAiThinking}
+                    selectedModel={selectedModel}
+                    modelOptions={chatModelOptions}
+                    onSelectModel={setSelectedModel}
+                  />
+                )}
             </div>
         </div>
     </div>
