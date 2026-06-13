@@ -20,6 +20,10 @@ import { useBoardWebSocket } from "../hooks/useBoardWebSocket";
 const CHAT_MODEL_STORAGE_KEY = "hackpilot_chat_model";
 const FALLBACK_CHAT_MODELS = ["gemma-4-31b-it", "gemini-2.5-flash", "gemini-2.5-pro"];
 const FALLBACK_DEFAULT_CHAT_MODEL = FALLBACK_CHAT_MODELS[0];
+const isClearChatCommand = (value: string) => {
+  const command = value.trim().toLowerCase().split(/\s+/)[0];
+  return command === "/clear" || command === "/clear-chat" || command === "/clearchat";
+};
 
 type ChatModelOption = {
   value: string;
@@ -142,6 +146,12 @@ export default function BoardPage({
 
   const handleSocketMessage = useCallback((payload: unknown) => {
     const event = payload as { type?: string; message?: ChatMessage; status?: boolean };
+    if (event.type === "CHAT_CLEARED") {
+      setChatMessages([]);
+      setIsAiThinking(false);
+      toast("Chat cleared.");
+      return;
+    }
     if (event.type === "CHAT_MESSAGE" && event.message) {
       upsertChatMessage(event.message);
       return;
@@ -149,7 +159,7 @@ export default function BoardPage({
     if (event.type === "CHAT_THINKING") {
       setIsAiThinking(Boolean(event.status));
     }
-  }, [upsertChatMessage]);
+  }, [toast, upsertChatMessage]);
 
   useBoardWebSocket(roomCode, handleSocketMessage);
   useEffect(() => {
@@ -421,6 +431,20 @@ export default function BoardPage({
   const handleSendMessage = async (text: string) => {
     const message = text.trim();
     if (!message) return;
+    if (isClearChatCommand(message)) {
+      try {
+        const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(
+          `/api/chat/clear?room_id=${encodeURIComponent(roomCode)}&sender=${encodeURIComponent("You")}`,
+          { method: "POST" },
+        );
+        setChatMessages([]);
+        setIsAiThinking(false);
+        if (response.ok === false) toast("Failed to clear chat.", "warn");
+      } catch {
+        toast("Failed to clear chat.", "warn");
+      }
+      return;
+    }
     const clientNonce = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     upsertChatMessage({
       sender: "You",

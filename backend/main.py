@@ -164,6 +164,95 @@ def merge_whiteboard_scenes(base_scene: Any, incoming_scene: Any) -> Dict[str, A
     merged_files = {**normalized_base["files"], **normalized_incoming["files"]}
     return {"elements": merged_elements, "files": merged_files}
 
+def _clean_text_snippet(value: Any, max_chars: int = 80) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = " ".join(value.split()).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+def _summarize_whiteboard_scene(scene: Any) -> str:
+    normalized = _normalize_scene(scene)
+    visible_elements = [
+        element
+        for element in normalized["elements"]
+        if isinstance(element, dict) and not bool(element.get("isDeleted"))
+    ]
+
+    if not visible_elements:
+        return "Whiteboard is currently empty (0 visible elements)."
+
+    type_counts: Dict[str, int] = {}
+    text_samples: List[str] = []
+
+    for element in visible_elements:
+        element_type = str(element.get("type") or "unknown")
+        type_counts[element_type] = type_counts.get(element_type, 0) + 1
+
+        for candidate in (element.get("text"), element.get("originalText"), element.get("label")):
+            snippet = _clean_text_snippet(candidate)
+            if snippet:
+                text_samples.append(snippet)
+                break
+
+    sorted_types = sorted(type_counts.items(), key=lambda entry: (-entry[1], entry[0]))
+    type_summary = ", ".join(f"{element_type}:{count}" for element_type, count in sorted_types[:8]) or "unknown"
+
+    unique_samples: List[str] = []
+    seen_samples: set[str] = set()
+    for sample in text_samples:
+        lowered = sample.lower()
+        if lowered in seen_samples:
+            continue
+        seen_samples.add(lowered)
+        unique_samples.append(sample)
+        if len(unique_samples) >= 6:
+            break
+
+    text_summary = " | ".join(f"\"{sample}\"" for sample in unique_samples) if unique_samples else "none"
+    return (
+        f"Whiteboard has {len(visible_elements)} visible elements. "
+        f"Element types: {type_summary}. "
+        f"Detected text snippets: {text_summary}."
+    )
+
+async def _get_room_whiteboard_scene(room_id: str, db_connected: bool) -> Dict[str, Any]:
+    default_scene = _default_whiteboard_scene()
+    if db_connected:
+        board = await db.whiteboards.find_one({"room_id": room_id}) or {}
+        return _normalize_scene(board.get("scene", default_scene))
+    room_scene = mock_whiteboards.get(room_id, {})
+    return _normalize_scene(room_scene.get("scene", default_scene))
+
+def _is_clear_chat_command(message: str) -> bool:
+    normalized = (message or "").strip().lower()
+    if not normalized:
+        return False
+    command = normalized.split()[0]
+    return command in {"/clear", "/clear-chat", "/clearchat"}
+
+async def _clear_room_chat_messages(room_id: str, requested_by: str = "You") -> Dict[str, Any]:
+    db_connected = await is_db_connected()
+    deleted_count = 0
+
+    if db_connected:
+        result = await db.chat_messages.delete_many({"room_id": room_id})
+        deleted_count = result.deleted_count
+
+    await manager.broadcast(
+        room_id,
+        {
+            "type": "CHAT_CLEARED",
+            "room_id": room_id,
+            "requested_by": requested_by,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
+    return {"ok": True, "saved": db_connected, "deleted_count": deleted_count}
+
 # --- WebSocket ---
 class ConnectionManager:
     def __init__(self):
@@ -451,12 +540,18 @@ async def get_chat_messages(room_id: str):
         )
     return {"messages": cleaned_messages, "saved": True}
 
+@app.post("/api/chat/clear")
+async def clear_chat_messages(room_id: str, sender: str = "You"):
+    return await _clear_room_chat_messages(room_id, sender)
+
 @app.post("/api/chat/message")
 async def send_chat_message(
     chat: ChatMessage, 
     x_gemini_api_key: Optional[str] = Header(None),
     x_gemini_model: Optional[str] = Header(None),
 ):
+    if _is_clear_chat_command(chat.message):
+        return await _clear_room_chat_messages(chat.room_id, chat.sender)
     custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
     if custom_key:
         genai.configure(api_key=custom_key)
@@ -498,8 +593,13 @@ async def send_chat_message(
     # Natural-language AI chat reply
     ai_reply = ""
     try:
+        whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
+        whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
         reply_prompt = (
             f'User message: "{chat.message}"\n'
+            f"Whiteboard context for this room: {whiteboard_summary}\n"
+            "If the user asks to describe, summarize, or inspect the whiteboard, use the whiteboard context above.\n"
+            "If the whiteboard is empty, clearly say that before offering next steps.\n"
             "Respond as HackBuddy AI in 1 to 3 short conversational sentences.\n"
             "If concrete work is requested, include actionable next steps.\n"
             "Output ONLY the final response text for the user.\n"

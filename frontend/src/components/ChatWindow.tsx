@@ -122,7 +122,7 @@ export const ChatWindow = ({
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Message or 'create task [title]'..."
+          placeholder="Message, 'create task [title]', or /clear..."
           className="w-full bg-white/[0.05] border border-white/[0.1] p-2.5 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
         />
       </form>
