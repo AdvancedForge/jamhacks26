@@ -574,42 +574,47 @@ async def send_chat_message(
 
     task_title: Optional[str] = None
 
-    # Intent detection for task creation
+    # Unified AI Intent and Reply
     try:
-        intent_prompt = (
-            f"Analyze this user message: '{chat.message}'. "
-            'If the user wants to create a task, return ONLY valid JSON like {"action":"create_task","title":"..."}; '
-            'otherwise return {"action":"ignore"}.'
+        prompt = (
+            "You are HackBuddy AI, a project board assistant. "
+            "Analyze the message. If the user wants to create one or more tasks, "
+            'return ONLY valid JSON: {"tasks": [{"title": "...", "description": "...", "column": "...", "assignee": "..."}], "reply": "..."}. '
+            'Otherwise, return {"tasks": [], "reply": "..."}. '
+            "Do NOT include any other text, chain-of-thought, or prompt echoes."
         )
-        intent_response = await intent_model.generate_content_async(intent_prompt)
-        intent = _extract_json_object((intent_response.text or "").strip())
-        if intent and intent.get("action") == "create_task":
-            task_title = str(intent.get("title") or "").strip()
-            if task_title:
-                task = Task(title=task_title, created_at=int(datetime.now().timestamp() * 1000))
-                await create_task(chat.room_id, task)
-    except Exception as e:
-        logger.warning(f"AI processing warning: {e}")
-    # Natural-language AI chat reply
-    ai_reply = ""
-    try:
+        
         whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
         whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
-        reply_prompt = (
-            f'User message: "{chat.message}"\n'
-            f"Whiteboard context for this room: {whiteboard_summary}\n"
-            "If the user asks to describe, summarize, or inspect the whiteboard, use the whiteboard context above.\n"
-            "If the whiteboard is empty, clearly say that before offering next steps.\n"
-            "Respond as HackBuddy AI in 1 to 3 short conversational sentences.\n"
-            "If concrete work is requested, include actionable next steps.\n"
-            "Output ONLY the final response text for the user.\n"
-            "Do NOT output analysis, planning, role labels, bullet points, or any text like "
-            "\"User says\", \"Role\", or \"Constraints\"."
+        
+        full_prompt = (
+            f'{prompt}\n\nWhiteboard context: {whiteboard_summary}\n'
+            f'User message: "{chat.message}"'
         )
-        reply_response = await reply_model.generate_content_async(reply_prompt)
-        ai_reply = _sanitize_chat_reply((reply_response.text or "").strip(), chat.message)
+        
+        response = await reply_model.generate_content_async(full_prompt)
+        result = _extract_json_object(response.text)
+        
+        # 1. Handle Tasks
+        if result and "tasks" in result and isinstance(result["tasks"], list):
+            for task_data in result["tasks"]:
+                task = Task(
+                    title=str(task_data.get("title") or "Untitled Task"),
+                    description=str(task_data.get("description") or ""),
+                    column=str(task_data.get("column") or "Backlog"),
+                    assignee=str(task_data.get("assignee") or ""),
+                    created_at=int(time.time() * 1000)
+                )
+                await create_task(chat.room_id, task)
+
+        # 2. Handle Reply
+        ai_reply = result.get("reply") if result and isinstance(result, dict) else None
+        if not ai_reply:
+            ai_reply = "Got your message!"
+        ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
     except Exception as e:
-        logger.warning(f"AI reply warning: {e}")
+        logger.warning(f"AI error: {e}")
+        ai_reply = "Got your message, but I had trouble processing it."
 
     if not ai_reply:
         ai_reply = _safe_chat_fallback(chat.message, task_title)
