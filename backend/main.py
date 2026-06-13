@@ -580,24 +580,37 @@ async def send_chat_message(
 
     task_title: Optional[str] = None
 
-    # Unified AI Intent and Reply
-    try:
+        # Fetch board data
+        board_data = await get_board(chat.room_id)
+        
+        whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
+        whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
+        
+        # Format board/roadmap context for AI
+        tasks_summary = "\n".join([f"- ID: {t['id']}, Title: {t['title']}, Status: {t['column']}" for t in board_data.get('tasks', [])])
+        roadmap_content = board_data.get('roadmap', 'No roadmap content.')
+        
         prompt = (
             "You are HackBuddy AI, a project board assistant. "
+            "You have access to the project board tasks and the roadmap. "
             "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
-            'Return valid JSON: {"tasks": [...], "reply": "..."}. '
-            '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates. If no tasks are needed, return an empty list []. '
-            '"reply" MUST be a direct, relevant answer to the user. If the user asks a question, answer it. '
+            'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": "..."}. '
+            '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
+            '"roadmap" should contain the updated roadmap markdown content if the user requests changes to it, otherwise omit this field. '
+            '"reply" MUST be a direct, relevant answer to the user. '
+            'If the user asks a question, answer it based on the provided tasks and roadmap. '
             'If the request is unclear, politely ask for clarification. '
             'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
             "Do NOT include any other text, chain-of-thought, or prompt echoes."
         )
         
-        whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
-        whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
-        
         full_prompt = (
-            f'{prompt}\n\nWhiteboard context: {whiteboard_summary}\n'
+            f'{prompt}\n\n'
+            f'--- Context ---\n'
+            f'Whiteboard: {whiteboard_summary}\n'
+            f'Tasks:\n{tasks_summary}\n'
+            f'Roadmap:\n{roadmap_content}\n'
+            f'---------------\n'
             f'User message: "{chat.message}"'
         )
         
@@ -628,6 +641,10 @@ async def send_chat_message(
                         created_at=int(time.time() * 1000)
                     )
                     await create_task(chat.room_id, task)
+
+        # 2. Handle Roadmap Update
+        if result and "roadmap" in result and isinstance(result["roadmap"], str):
+            await update_roadmap(chat.room_id, {"roadmap": result["roadmap"]})
 
         # 2. Handle Reply
         ai_reply = result.get("reply") if result and isinstance(result, dict) else None
