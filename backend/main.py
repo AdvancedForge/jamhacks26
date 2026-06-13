@@ -1215,10 +1215,28 @@ async def get_whiteboard_scene(room_id: str):
             upsert=True,
         )
         board = await db.whiteboards.find_one({"room_id": room_id}) or {}
+        normalized_scene = _normalize_scene(board.get("scene", default_scene))
+        raw_scene_version = board.get("scene_version")
+        scene_version = _to_int(raw_scene_version)
+        updated_at = _to_int(board.get("updated_at", now)) or now
+
+        backfill_fields: Dict[str, Any] = {}
+        if raw_scene_version is None:
+            backfill_fields["scene_version"] = scene_version
+        if not isinstance(board.get("scene"), dict):
+            backfill_fields["scene"] = normalized_scene
+        if "updated_at" not in board:
+            backfill_fields["updated_at"] = updated_at
+
+        if backfill_fields:
+            await db.whiteboards.update_one(
+                {"room_id": room_id},
+                {"$set": backfill_fields},
+            )
         return {
-            "scene": board.get("scene", default_scene),
-            "updated_at": board.get("updated_at", now),
-            "scene_version": _to_int(board.get("scene_version", 0)),
+            "scene": normalized_scene,
+            "updated_at": updated_at,
+            "scene_version": scene_version,
         }
 
     if room_id not in mock_whiteboards:
@@ -1254,15 +1272,26 @@ async def save_whiteboard_scene(room_id: str, payload: WhiteboardScenePayload):
             upsert=True,
         )
 
-        for _ in range(6):
+        for _ in range(10):
             board = await db.whiteboards.find_one({"room_id": room_id}) or {}
-            current_scene = board.get("scene", _default_whiteboard_scene())
-            current_version = _to_int(board.get("scene_version", 0))
+            current_scene = _normalize_scene(board.get("scene", _default_whiteboard_scene()))
+            raw_scene_version = board.get("scene_version")
+            current_version = _to_int(raw_scene_version)
             merged_scene = merge_whiteboard_scenes(current_scene, incoming_scene)
             next_version = current_version + 1
+            version_filter: Dict[str, Any]
+            if raw_scene_version is None:
+                version_filter = {
+                    "$or": [
+                        {"scene_version": {"$exists": False}},
+                        {"scene_version": None},
+                    ]
+                }
+            else:
+                version_filter = {"scene_version": raw_scene_version}
 
             update_result = await db.whiteboards.update_one(
-                {"room_id": room_id, "scene_version": current_version},
+                {"room_id": room_id, **version_filter},
                 {
                     "$set": {
                         "scene": merged_scene,
@@ -1272,7 +1301,7 @@ async def save_whiteboard_scene(room_id: str, payload: WhiteboardScenePayload):
                 },
             )
 
-            if update_result.modified_count == 1:
+            if update_result.matched_count == 1:
                 saved_scene = merged_scene
                 saved_version = next_version
                 conflict_resolved = (

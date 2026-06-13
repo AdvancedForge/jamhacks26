@@ -419,7 +419,7 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
   }, [applyRemoteScene, roomCode]);
 
   const pushSharedScene = useCallback(
-    async (elements: readonly unknown[], files: unknown) => {
+    async (elements: readonly unknown[], files: unknown, retryCount = 0) => {
       const localScene = normalizeScene({ elements, files });
       const signature = sceneSignature(localScene);
       if (signature === lastSceneSignatureRef.current) return;
@@ -449,13 +449,38 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
 
         setSyncState("live");
         setLastSyncedAt(Date.now());
-      } catch {
-        if (requestId === saveRequestIdRef.current) {
-          setSyncState("offline");
+      } catch (error) {
+        if (requestId !== saveRequestIdRef.current) return;
+
+        const message = error instanceof Error ? error.message : "";
+        const isConflict = message.startsWith("409") || message.includes("409");
+        if (isConflict && retryCount < 2) {
+          await fetchSharedScene();
+          const latestLocalScene = getLocalScene();
+          const latestSignature = sceneSignature(latestLocalScene);
+          if (latestSignature !== lastSceneSignatureRef.current) {
+            window.setTimeout(() => {
+              pushSharedScene(
+                latestLocalScene.elements,
+                latestLocalScene.files,
+                retryCount + 1,
+              );
+            }, 180);
+          }
+          return;
         }
+
+        setSyncState("offline");
       }
     },
-    [applyRemoteScene, normalizeScene, roomCode, sceneSignature],
+    [
+      applyRemoteScene,
+      fetchSharedScene,
+      getLocalScene,
+      normalizeScene,
+      roomCode,
+      sceneSignature,
+    ],
   );
 
   const queueSceneSave = useCallback(
