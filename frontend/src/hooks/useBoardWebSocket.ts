@@ -1,16 +1,19 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef } from "react";
+import { WS_BASE } from "../hackbuddyApi";
 
 export const useBoardWebSocket = (roomCode: string | null, onMessage: (message: any) => void) => {
   const ws = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     if (!roomCode) return;
-
-    ws.current = new WebSocket(`${import.meta.env.VITE_WS_BASE_URL}/ws/board/${roomCode}`);
+    ws.current = new WebSocket(`${WS_BASE}/ws/board/${roomCode}`);
 
     ws.current.onmessage = (event) => {
       const data = JSON.parse(event.data);
       onMessage(data);
+    };
+    ws.current.onerror = (event) => {
+      console.warn("Board websocket error", event);
     };
 
     return () => {

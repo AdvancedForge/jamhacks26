@@ -23,6 +23,7 @@ type ChatMessage = {
   sender: string;
   message: string;
   timestamp?: string;
+  client_nonce?: string;
 };
 
 export default function BoardPage({
@@ -83,21 +84,35 @@ export default function BoardPage({
 
     return merged;
   }, []);
+  const upsertChatMessage = useCallback((incoming: ChatMessage) => {
+    setChatMessages((currentMessages) => {
+      const existingIndex = currentMessages.findIndex((message) => {
+        if (incoming.id && message.id === incoming.id) return true;
+        if (incoming.client_nonce && message.client_nonce === incoming.client_nonce) return true;
+        if (
+          incoming.sender === message.sender &&
+          incoming.message === message.message &&
+          incoming.timestamp &&
+          message.timestamp &&
+          incoming.timestamp === message.timestamp
+        ) {
+          return true;
+        }
+        return false;
+      });
+
+      if (existingIndex === -1) return [...currentMessages, incoming];
+      const nextMessages = [...currentMessages];
+      nextMessages[existingIndex] = { ...nextMessages[existingIndex], ...incoming };
+      return nextMessages;
+    });
+  }, []);
 
   const handleSocketMessage = useCallback((payload: unknown) => {
     const event = payload as { type?: string; message?: ChatMessage };
     if (event.type !== "CHAT_MESSAGE" || !event.message) return;
-    const incoming = event.message;
-    setChatMessages((currentMessages) => {
-      const incomingKey = incoming.id || `${incoming.timestamp || ""}|${incoming.sender}|${incoming.message}`;
-      const duplicate = currentMessages.some((message) => {
-        const messageKey = message.id || `${message.timestamp || ""}|${message.sender}|${message.message}`;
-        return messageKey === incomingKey;
-      });
-      if (duplicate) return currentMessages;
-      return [...currentMessages, incoming];
-    });
-  }, []);
+    upsertChatMessage(event.message);
+  }, [upsertChatMessage]);
 
   useBoardWebSocket(roomCode, handleSocketMessage);
 
@@ -316,12 +331,25 @@ export default function BoardPage({
   };
 
   const handleSendMessage = async (text: string) => {
+    const message = text.trim();
+    if (!message) return;
+    const clientNonce = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    upsertChatMessage({
+      sender: "You",
+      message,
+      timestamp: new Date().toISOString(),
+      client_nonce: clientNonce,
+    });
     try {
-      await apiFetch(`/api/chat/message`, {
+      const response = await apiFetch<{ ok?: boolean }>(`/api/chat/message`, {
         method: "POST",
-        body: JSON.stringify({ room_id: roomCode, sender: "You", message: text }),
+        body: JSON.stringify({ room_id: roomCode, sender: "You", message, client_nonce: clientNonce }),
       });
+      if (response.ok === false) {
+        toast("Chat was queued locally; backend did not persist it.", "warn");
+      }
     } catch {
+      setChatMessages((currentMessages) => currentMessages.filter((entry) => entry.client_nonce !== clientNonce));
       toast("Failed to send chat message.", "warn");
     }
   };

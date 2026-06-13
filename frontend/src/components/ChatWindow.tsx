@@ -12,9 +12,9 @@ export const ChatWindow = ({
   messages,
   onSendMessage,
 }: {
-  roomCode: string;
+  roomCode?: string;
   messages: ChatMessage[];
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string) => void | Promise<void>;
 }) => {
   const [input, setInput] = useState('');
 
@@ -28,7 +28,7 @@ export const ChatWindow = ({
   return (
     <div className="flex flex-col h-full bg-[#08090a] border-l border-white/[0.04]">
       <div className="p-4 border-b border-white/[0.04] font-bold text-gray-200">
-        Team Chat ({roomCode})
+        Team Chat ({roomCode || "—"})
       </div>
       <div className="flex-grow overflow-y-auto p-4 space-y-3">
         {messages.map((m, i) => (
