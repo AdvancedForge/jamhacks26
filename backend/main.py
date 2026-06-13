@@ -387,7 +387,10 @@ def _safe_chat_fallback(user_message: str, task_title: Optional[str] = None) -> 
 # --- Chat Endpoints ---
 
 @app.post("/api/chat/message")
-async def send_chat_message(chat: ChatMessage):
+async def send_chat_message(
+    chat: ChatMessage, 
+    x_gemini_api_key: Optional[str] = Header(None)
+):
     db_connected = await is_db_connected()
     message_dict = chat.model_dump(exclude_none=True)
     message_dict["timestamp"] = datetime.now().isoformat()
@@ -407,6 +410,11 @@ async def send_chat_message(chat: ChatMessage):
 
     # Intent detection for task creation
     try:
+        # Override key if custom one provided
+        custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
+        genai.configure(api_key=custom_key)
+        
+        # ... (rest of the logic remains largely the same)
         intent_prompt = (
             f"Analyze this user message: '{chat.message}'. "
             'If the user wants to create a task, return ONLY valid JSON like {"action":"create_task","title":"..."}; '

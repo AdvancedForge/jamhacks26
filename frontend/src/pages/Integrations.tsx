@@ -19,6 +19,12 @@ export default function IntegrationsPage({ roomCode, toast }: { roomCode: string
   const [connected, setConnected] = useState(false);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [connecting, setConnecting] = useState(false);
+  const [geminiKey, setGeminiKey] = useState(localStorage.getItem('hackpilot_gemini_key') || '');
+
+  const saveGeminiKey = () => {
+    localStorage.setItem('hackpilot_gemini_key', geminiKey);
+    toast("Gemini API Key saved!", "success");
+  };
 
   const fetchCommits = useCallback(async () => {
     try {
@@ -132,27 +138,24 @@ export default function IntegrationsPage({ roomCode, toast }: { roomCode: string
         </section>
 
         <section>
-          <h2 className="text-[18px] font-semibold text-white mb-2">ElevenLabs voice</h2>
+          <h2 className="text-[18px] font-semibold text-white mb-2">HackPilot API Key</h2>
           <p className="text-[14px] text-[#52525b] mb-5 leading-relaxed">
-            The Read update button on the Board page reads a brief standup summary of your current task state aloud. Configure your
-            ElevenLabs voice ID in the backend{" "}
-            <code className="text-[#a1a1aa] bg-white/[0.04] px-2 py-0.5 rounded text-[12px]">.env</code>.
+            Set your custom Gemini API key for your session to use HackBuddy AI.
           </p>
-          <div className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-5">
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="#71717a">
-                  <path d="M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 0 0 1.5 12c0 .898.121 1.768.35 2.595.341 1.24 1.518 1.905 2.659 1.905h1.93l4.5 4.5c.945.945 2.561.276 2.561-1.06V4.06ZM18.584 5.106a.75.75 0 0 1 1.06 0c3.808 3.807 3.808 9.98 0 13.788a.75.75 0 0 1-1.06-1.06 8.25 8.25 0 0 0 0-11.668.75.75 0 0 1 0-1.06Z" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-[14px] text-white font-medium">ElevenLabs multilingual v2</p>
-                <p className="text-[13px] text-[#52525b]">Triggered from the Board page — reads live task data</p>
-              </div>
-              <div className="ml-auto text-[11px] text-[#52525b] bg-white/[0.03] border border-white/[0.06] px-3 py-1.5 rounded-lg">
-                Set ELEVENLABS_API_KEY in .env
-              </div>
-            </div>
+          <div className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-5 flex gap-3">
+             <input
+                  type="password"
+                  value={geminiKey}
+                  onChange={(event) => setGeminiKey(event.target.value)}
+                  placeholder="AI_KEY_..."
+                  className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
+                />
+                <button
+                  onClick={saveGeminiKey}
+                  className="bg-white hover:shadow-[0_0_30px_rgba(255,255,255,0.1)] text-[#09090b] text-[14px] font-medium px-5 rounded-xl transition-all whitespace-nowrap"
+                >
+                  Save Key
+                </button>
           </div>
         </section>
       </div>
