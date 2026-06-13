@@ -36,10 +36,14 @@ function timeAgo(ts: number) {
   return `${Math.floor(s / 60)}m ago`;
 }
 
-async function apiFetch(path: string, opts = {}) {
+async function apiFetch(path: string, opts: RequestInit = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "true",
+      ...opts.headers,
+    },
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();

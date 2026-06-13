@@ -2,8 +2,10 @@ import os
 import logging
 import random
 import string
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import traceback
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,7 +14,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
+
+# Global exception handler to ensure CORS headers are always sent
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+    )
 
 # --- CORS (Relaxed) ---
 app.add_middleware(
@@ -39,12 +54,15 @@ async def is_db_connected():
 
 # --- Models ---
 class Task(BaseModel):
+    model_config = {"populate_by_name": True}
+    
     id: Optional[str] = Field(alias="_id", default=None)
     title: str
     description: Optional[str] = None
     column: str = "Backlog"
     assignee: Optional[str] = None
-    created_at: int
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
     git_linked: Optional[str] = None
 
 # --- WebSocket ---
@@ -124,27 +142,29 @@ async def get_board(room_id: str):
 @app.post("/api/task/create")
 async def create_task(room_id: str, task: Task):
     if await is_db_connected():
-        task_dict = task.dict(exclude={"id"})
+        task_dict = task.model_dump(exclude={"id"}, exclude_none=True)
         task_dict["room_id"] = room_id
+        if "created_at" not in task_dict:
+            task_dict["created_at"] = int(__import__("time").time() * 1000)
         result = await db.tasks.insert_one(task_dict)
         task_dict["id"] = str(result.inserted_id)
         # Broadcast
         await manager.broadcast(room_id, {"type": "TASK_CREATED", "task": task_dict})
         return task_dict
     else:
-        return {"task_id": "t_mock_001", **task.dict()}
+        return {"task_id": "t_mock_001", **task.model_dump()}
 
 @app.put("/api/task/{task_id}")
 async def update_task(room_id: str, task_id: str, task: Task):
     if await is_db_connected():
-        task_dict = task.dict(exclude={"id"})
+        task_dict = task.model_dump(exclude={"id"}, exclude_none=True)
         await db.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": task_dict})
         task_dict["id"] = task_id
         # Broadcast
         await manager.broadcast(room_id, {"type": "TASK_UPDATED", "task": task_dict})
         return {"task_id": task_id, **task_dict}
     else:
-        return {"task_id": task_id, **task.dict()}
+        return {"task_id": task_id, **task.model_dump()}
 
 @app.delete("/api/task/{task_id}")
 async def delete_task(room_id: str, task_id: str):
