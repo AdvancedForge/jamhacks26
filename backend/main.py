@@ -272,6 +272,7 @@ async def send_chat_message(chat: ChatMessage):
     if db_connected:
         result = await db.chat_messages.insert_one(message_dict)
         message_dict["id"] = str(result.inserted_id)
+        message_dict.pop("_id", None)
     else:
         message_dict["id"] = f"temp_{int(time.time() * 1000)}"
 
@@ -326,6 +327,7 @@ async def send_chat_message(chat: ChatMessage):
     if db_connected:
         ai_result = await db.chat_messages.insert_one(ai_message_dict)
         ai_message_dict["id"] = str(ai_result.inserted_id)
+        ai_message_dict.pop("_id", None)
     else:
         ai_message_dict["id"] = f"temp_ai_{int(time.time() * 1000)}"
 
@@ -396,6 +398,7 @@ async def create_task(room_id: str, task: Task):
             task_dict["created_at"] = int(__import__("time").time() * 1000)
         result = await db.tasks.insert_one(task_dict)
         task_dict["id"] = str(result.inserted_id)
+        task_dict.pop("_id", None)
         # Broadcast
         await manager.broadcast(room_id, {"type": "TASK_CREATED", "task": task_dict})
         return task_dict
