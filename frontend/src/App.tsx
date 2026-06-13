@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import EntryScreen from "./components/EntryScreen";
 import ToastList from "./components/ToastList";
 import Topbar from "./components/Topbar";
@@ -13,6 +13,7 @@ export default function App() {
   const [page, setPage] = useState<AppPage>("Board");
   const [polledAt, setPolledAt] = useState(Date.now());
   const { toasts, add: toast } = useToasts();
+  const handlePoll = useCallback(() => setPolledAt(Date.now()), []);
 
   const handleEnter = (code: string) => {
     setRoomCode(code);
@@ -47,7 +48,7 @@ export default function App() {
       <Topbar roomCode={roomCode} page={page} onNav={setPage} polledAt={polledAt} />
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {page === "Board" && <BoardPage roomCode={roomCode} toast={toast} onPoll={() => setPolledAt(Date.now())} />}
+        {page === "Board" && <BoardPage roomCode={roomCode} toast={toast} onPoll={handlePoll} />}
         {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
         {page === "Integrations" && <IntegrationsPage roomCode={roomCode} toast={toast} />}
       </main>
