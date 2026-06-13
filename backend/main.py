@@ -1,6 +1,9 @@
 import os
 import logging
-from fastapi import FastAPI, HTTPException
+import random
+import string
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,6 +13,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI()
+
+# --- CORS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # For development, adjust to specific frontend URL in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- Database ---
 MONGODB_URI = os.getenv("MONGODB_URI")
@@ -34,13 +46,6 @@ class Task(BaseModel):
     assignee: Optional[str] = None
     created_at: int
     git_linked: Optional[str] = None
-
-import os
-import logging
-import random
-import string
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-# ... (rest of imports)
 
 # --- WebSocket ---
 class ConnectionManager:
@@ -71,9 +76,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
-
-# --- Updated CRUD Endpoints (Broadcast) ---
-# ... (will update these next)
 
 # --- Kanban Endpoints ---
 
