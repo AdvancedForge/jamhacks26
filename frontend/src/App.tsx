@@ -8,6 +8,8 @@ import BoardPage from "./pages/Board";
 import WhiteboardPage from "./pages/Whiteboard";
 import IntegrationsPage from "./pages/Integrations";
 
+import RoadmapPage from "./pages/Roadmap";
+
 export default function App() {
   const [roomCode, setRoomCode] = useState(() => localStorage.getItem("hb_room") || "");
   const [page, setPage] = useState<AppPage>("Board");
@@ -51,6 +53,7 @@ export default function App() {
         {page === "Board" && <BoardPage roomCode={roomCode} toast={toast} onPoll={handlePoll} />}
         {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
         {page === "Integrations" && <IntegrationsPage roomCode={roomCode} toast={toast} />}
+        {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
       </main>
 
       <ToastList toasts={toasts} />

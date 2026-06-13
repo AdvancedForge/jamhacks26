@@ -679,7 +679,7 @@ async def get_board(room_id: str):
     if await is_db_connected():
         board = await db.boards.find_one({"room_id": room_id})
         if not board:
-            board = {"room_id": room_id, "columns": ["Backlog", "In Progress", "Done"], "tasks": []}
+            board = {"room_id": room_id, "columns": ["Backlog", "In Progress", "Done"], "tasks": [], "roadmap": ""}
             await db.boards.insert_one(board)
         
         tasks = await db.tasks.find({"room_id": room_id, "deleted": {"$ne": True}}).to_list(length=100)
@@ -696,7 +696,11 @@ async def get_board(room_id: str):
                 "git_linked": task.get("git_linked"),
             }
             clean_tasks.append(clean_task)
-        return {"columns": board.get("columns", ["Backlog", "In Progress", "Done"]), "tasks": clean_tasks}
+        return {
+            "columns": board.get("columns", ["Backlog", "In Progress", "Done"]),
+            "tasks": clean_tasks,
+            "roadmap": board.get("roadmap", "")
+        }
     else:
         # MOCK FALLBACK
         return {
@@ -711,8 +715,17 @@ async def get_board(room_id: str):
                     "created_at": 1720000000,
                     "git_linked": None
                 }
-            ]
+            ],
+            "roadmap": "# Roadmap\n- [ ] Task 1"
         }
+
+@app.put("/api/roadmap/{room_id}")
+async def update_roadmap(room_id: str, data: dict):
+    if await is_db_connected():
+        roadmap = data.get("roadmap", "")
+        await db.boards.update_one({"room_id": room_id}, {"$set": {"roadmap": roadmap}})
+        return {"ok": True}
+    return {"ok": False}
 
 @app.post("/api/task/create")
 async def create_task(room_id: str, task: Task):

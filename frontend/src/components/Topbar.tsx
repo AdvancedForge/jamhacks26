@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AppPage } from "../hackbuddyTypes";
 
-const NAV: AppPage[] = ["Board", "Whiteboard", "Integrations"];
+const NAV: AppPage[] = ["Board", "Whiteboard", "Integrations", "Roadmap"];
 
 export default function Topbar({
   roomCode,
