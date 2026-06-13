@@ -236,6 +236,16 @@ import google.generativeai as genai
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel('gemma-4-31b-it')
+chat_model = genai.GenerativeModel(
+    'gemma-4-31b-it',
+    system_instruction=(
+        "You are HackBuddy AI, a friendly and helpful project board assistant. "
+        "Your task is to reply conversationally to the user message in 1 to 3 short sentences. "
+        "If they ask for concrete work, suggest actionable next steps. "
+        "CRITICAL: Do NOT output any chain-of-thought, thinking process, planning, "
+        "role descriptions, or bullet points. Output ONLY the direct response to the user."
+    )
+)
 
 def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
     if not raw_text:
@@ -300,13 +310,7 @@ async def send_chat_message(chat: ChatMessage):
     # Natural-language AI chat reply
     ai_reply = ""
     try:
-        reply_prompt = (
-            "You are HackBuddy AI helping a team collaborate on a project board. "
-            "Reply conversationally to the user in 1-3 short sentences. "
-            "If they ask for concrete work, suggest actionable next steps."
-            f"\nUser message: {chat.message}"
-        )
-        reply_response = await model.generate_content_async(reply_prompt)
+        reply_response = await chat_model.generate_content_async(chat.message)
         ai_reply = (reply_response.text or "").strip()
     except Exception as e:
         logger.warning(f"AI reply warning: {e}")
