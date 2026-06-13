@@ -1,17 +1,19 @@
-import os
 import logging
+import os
 import random
 import string
-import traceback
 import time
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
-from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+import traceback
 from typing import Any, Dict, List, Optional
-from motor.motor_asyncio import AsyncIOMotorClient
+
 from bson import ObjectId
 from dotenv import load_dotenv
+from fastapi import (FastAPI, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
+from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
+from fastapi.responses import JSONResponse
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -226,12 +228,13 @@ class ChatMessage(BaseModel):
     sender: str
     message: str
 
-import google.generativeai as genai
 import base64
+
+import google.generativeai as genai
 
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemma-4-31b-it')
 
 # --- Chat Endpoints ---
 
