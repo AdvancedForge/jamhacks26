@@ -39,8 +39,41 @@ import os
 import logging
 import random
 import string
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 # ... (rest of imports)
+
+# --- WebSocket ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, room_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if room_id not in self.active_connections:
+            self.active_connections[room_id] = []
+        self.active_connections[room_id].append(websocket)
+
+    def disconnect(self, room_id: str, websocket: WebSocket):
+        self.active_connections[room_id].remove(websocket)
+
+    async def broadcast(self, room_id: str, message: dict):
+        if room_id in self.active_connections:
+            for connection in self.active_connections[room_id]:
+                await connection.send_json(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/board/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str):
+    await manager.connect(room_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(room_id, websocket)
+
+# --- Updated CRUD Endpoints (Broadcast) ---
+# ... (will update these next)
 
 # --- Kanban Endpoints ---
 
@@ -92,23 +125,30 @@ async def create_task(room_id: str, task: Task):
         task_dict["room_id"] = room_id
         result = await db.tasks.insert_one(task_dict)
         task_dict["id"] = str(result.inserted_id)
+        # Broadcast
+        await manager.broadcast(room_id, {"type": "TASK_CREATED", "task": task_dict})
         return task_dict
     else:
         return {"task_id": "t_mock_001", **task.dict()}
 
 @app.put("/api/task/{task_id}")
-async def update_task(task_id: str, task: Task):
+async def update_task(room_id: str, task_id: str, task: Task):
     if await is_db_connected():
         task_dict = task.dict(exclude={"id"})
         await db.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": task_dict})
+        task_dict["id"] = task_id
+        # Broadcast
+        await manager.broadcast(room_id, {"type": "TASK_UPDATED", "task": task_dict})
         return {"task_id": task_id, **task_dict}
     else:
         return {"task_id": task_id, **task.dict()}
 
 @app.delete("/api/task/{task_id}")
-async def delete_task(task_id: str):
+async def delete_task(room_id: str, task_id: str):
     if await is_db_connected():
         await db.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"deleted": True}})
+        # Broadcast
+        await manager.broadcast(room_id, {"type": "TASK_DELETED", "task_id": task_id})
     return {"ok": True}
 
 # --- Whiteboard Endpoints ---
