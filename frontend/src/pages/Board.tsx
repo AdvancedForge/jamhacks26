@@ -1,12 +1,15 @@
-import { useContext, useState, useEffect, useCallback } from 'react';
+import { useState, useContext, useEffect } from 'react';
+import { DndContext, closestCenter } from '@dnd-kit/core';
+import { arrayMove } from '@dnd-kit/sortable';
 import { RoomContext } from '../context/RoomContext';
 import { useBoardWebSocket } from '../hooks/useBoardWebSocket';
+import { KanbanColumn } from '../components/KanbanColumn';
 
 export const Board = () => {
   const { roomCode } = useContext(RoomContext);
   const [tasks, setTasks] = useState<any[]>([]);
 
-  const handleMessage = useCallback((message: any) => {
+  const handleMessage = (message: any) => {
     switch (message.type) {
       case 'TASK_CREATED':
         setTasks((prev) => [...prev, message.task]);
@@ -18,24 +21,52 @@ export const Board = () => {
         setTasks((prev) => prev.filter(t => t.id !== message.task_id));
         break;
     }
-  }, []);
+  };
 
   useBoardWebSocket(roomCode, handleMessage);
 
   useEffect(() => {
     if (roomCode) {
-        // Fetch initial board state
-        fetch(`http://localhost:8000/api/board/${roomCode}`)
-            .then(res => res.json())
-            .then(data => setTasks(data.tasks));
+      fetch(`http://localhost:8000/api/board/${roomCode}`)
+        .then(res => res.json())
+        .then(data => setTasks(data.tasks));
     }
   }, [roomCode]);
 
+  const onDragEnd = (event: any) => {
+    const { active, over } = event;
+    if (!over) return;
+    
+    const taskId = active.id;
+    const newColumn = over.id;
+    const task = tasks.find(t => t.id === taskId);
+    if (task && task.column !== newColumn) {
+        // Optimistic update
+        setTasks(prev => prev.map(t => t.id === taskId ? {...t, column: newColumn} : t));
+        // API Call
+        fetch(`http://localhost:8000/api/task/${taskId}?room_id=${roomCode}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({...task, column: newColumn})
+        });
+    }
+  };
+
+  const columns = ["Backlog", "In Progress", "Done"];
+
   return (
-    <div className="p-4">
-      <h1 className="text-2xl font-bold mb-4">Kanban Board ({roomCode})</h1>
-      {/* Kanban UI here, using tasks state */}
-      <pre>{JSON.stringify(tasks, null, 2)}</pre>
-    </div>
+    <DndContext collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <div className="flex gap-4 p-4 h-full">
+        {columns.map(col => (
+          <KanbanColumn 
+            key={col} 
+            title={col} 
+            tasks={tasks.filter(t => t.column === col)} 
+            onTaskClick={(t) => console.log('Edit task', t)}
+            onAddTask={() => console.log('Add task in', col)}
+          />
+        ))}
+      </div>
+    </DndContext>
   );
 };
