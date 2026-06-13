@@ -715,6 +715,9 @@ function BoardPage({ roomCode, toast, onPoll }: { roomCode: string; toast: (msg:
 // ─── whiteboard page ──────────────────────────────────────────────────────────
 
 function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: React.ReactNode, type?: string) => void }) {
+  type SceneElement = Record<string, unknown>;
+  type SceneFiles = Record<string, unknown>;
+  type SceneState = { elements: SceneElement[]; files: SceneFiles };
   const [framework, setFramework] = useState<string>("react");
   const [status, setStatus] = useState<string>("idle"); // idle | loading | done | error
   const [code, setCode] = useState<string>("");
@@ -725,71 +728,242 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
   const saveTimerRef = useRef<number | null>(null);
   const lastSceneSignatureRef = useRef("");
   const lastServerUpdateRef = useRef(0);
+  const lastSceneVersionRef = useRef(0);
+  const fetchRequestIdRef = useRef(0);
+  const saveRequestIdRef = useRef(0);
+  const hasLoadedInitialSceneRef = useRef(false);
+  const actorIdRef = useRef(`wb_${Math.random().toString(36).slice(2, 10)}`);
 
-  const normalizeScene = useCallback((scene: any) => {
-    const elements: readonly unknown[] = Array.isArray(scene?.elements) ? scene.elements : [];
-    const files = scene?.files && typeof scene.files === "object" ? scene.files : {};
+  const asSceneElement = useCallback((value: unknown): SceneElement | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return value as SceneElement;
+  }, []);
+
+  const normalizeScene = useCallback((scene: unknown): SceneState => {
+    if (!scene || typeof scene !== "object" || Array.isArray(scene)) {
+      return { elements: [], files: {} };
+    }
+    const rawScene = scene as Record<string, unknown>;
+    const rawElements = Array.isArray(rawScene.elements) ? rawScene.elements : [];
+    const elements = rawElements
+      .map(asSceneElement)
+      .filter((element): element is SceneElement => element !== null);
+    const files = rawScene.files && typeof rawScene.files === "object" && !Array.isArray(rawScene.files)
+      ? { ...(rawScene.files as SceneFiles) }
+      : {};
     return { elements, files };
-  }, []);
-  const sceneSignature = useCallback((scene: { elements: readonly unknown[]; files: Record<string, any> }) => {
-    return JSON.stringify({ elements: scene.elements, files: scene.files });
+  }, [asSceneElement]);
+
+  const elementId = useCallback((element: SceneElement) => {
+    const id = element.id;
+    return typeof id === "string" ? id : "";
   }, []);
 
-  const applyRemoteScene = useCallback((scene: any) => {
+  const elementNumber = useCallback((element: SceneElement, key: string) => {
+    const value = element[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  }, []);
+
+  const chooseNewerElement = useCallback((left: SceneElement, right: SceneElement) => {
+    const leftVersion = elementNumber(left, "version");
+    const rightVersion = elementNumber(right, "version");
+    if (rightVersion !== leftVersion) {
+      return rightVersion > leftVersion ? right : left;
+    }
+
+    const leftUpdated = elementNumber(left, "updated");
+    const rightUpdated = elementNumber(right, "updated");
+    if (rightUpdated !== leftUpdated) {
+      return rightUpdated > leftUpdated ? right : left;
+    }
+
+    const leftNonce = elementNumber(left, "versionNonce");
+    const rightNonce = elementNumber(right, "versionNonce");
+    if (rightNonce !== leftNonce) {
+      return rightNonce > leftNonce ? right : left;
+    }
+
+    const leftDeleted = Boolean(left.isDeleted);
+    const rightDeleted = Boolean(right.isDeleted);
+    if (rightDeleted !== leftDeleted) {
+      return rightDeleted ? right : left;
+    }
+
+    return right;
+  }, [elementNumber]);
+
+  const mergeScenes = useCallback((baseScene: unknown, incomingScene: unknown): SceneState => {
+    const base = normalizeScene(baseScene);
+    const incoming = normalizeScene(incomingScene);
+
+    const winners = new Map<string, SceneElement>();
+    const baseById = new Map<string, SceneElement>();
+    const incomingOrder: string[] = [];
+    const baseOrder: string[] = [];
+
+    for (const element of base.elements) {
+      const id = elementId(element);
+      if (!id) continue;
+      baseById.set(id, element);
+      baseOrder.push(id);
+    }
+
+    for (const element of incoming.elements) {
+      const id = elementId(element);
+      if (!id) continue;
+      incomingOrder.push(id);
+      const existing = baseById.get(id);
+      winners.set(id, existing ? chooseNewerElement(existing, element) : element);
+    }
+
+    for (const [id, element] of baseById.entries()) {
+      if (!winners.has(id)) {
+        winners.set(id, element);
+      }
+    }
+
+    const mergedElements: SceneElement[] = [];
+    const emitted = new Set<string>();
+    for (const id of [...incomingOrder, ...baseOrder]) {
+      if (emitted.has(id)) continue;
+      const winner = winners.get(id);
+      if (!winner) continue;
+      mergedElements.push(winner);
+      emitted.add(id);
+    }
+    for (const [id, winner] of winners.entries()) {
+      if (emitted.has(id)) continue;
+      mergedElements.push(winner);
+      emitted.add(id);
+    }
+
+    return {
+      elements: mergedElements,
+      files: { ...base.files, ...incoming.files },
+    };
+  }, [chooseNewerElement, elementId, normalizeScene]);
+
+  const sceneSignature = useCallback((scene: SceneState) => {
+    const elementPart = scene.elements
+      .map((element) => {
+        return `${elementId(element)}:${elementNumber(element, "version")}:${elementNumber(element, "updated")}:${elementNumber(element, "versionNonce")}:${Boolean(element.isDeleted) ? 1 : 0}`;
+      })
+      .join("|");
+    const filePart = Object.keys(scene.files).sort().join(",");
+    return `${elementPart}::${filePart}`;
+  }, [elementId, elementNumber]);
+
+  const getLocalScene = useCallback((): SceneState => {
+    if (!excalidrawAPI) return { elements: [], files: {} };
+    const elements = typeof excalidrawAPI.getSceneElementsIncludingDeleted === "function"
+      ? excalidrawAPI.getSceneElementsIncludingDeleted()
+      : typeof excalidrawAPI.getSceneElements === "function"
+        ? excalidrawAPI.getSceneElements()
+        : [];
+    const files = typeof excalidrawAPI.getFiles === "function" ? excalidrawAPI.getFiles() : {};
+    return normalizeScene({ elements, files });
+  }, [excalidrawAPI, normalizeScene]);
+
+  const applyRemoteScene = useCallback((remoteScene: unknown) => {
     if (!excalidrawAPI) return;
-    const normalized = normalizeScene(scene);
-    const signature = sceneSignature(normalized);
+    const mergedScene = mergeScenes(getLocalScene(), remoteScene);
+    const signature = sceneSignature(mergedScene);
     if (signature === lastSceneSignatureRef.current) return;
 
     applyingRemoteRef.current = true;
-    excalidrawAPI.updateScene(normalized);
+    excalidrawAPI.updateScene(mergedScene);
     lastSceneSignatureRef.current = signature;
     window.setTimeout(() => {
       applyingRemoteRef.current = false;
     }, 0);
-  }, [excalidrawAPI, normalizeScene, sceneSignature]);
+  }, [excalidrawAPI, getLocalScene, mergeScenes, sceneSignature]);
 
   const fetchSharedScene = useCallback(async () => {
+    const requestId = ++fetchRequestIdRef.current;
     try {
       const data = await apiFetch(`/api/whiteboard/scene/${roomCode}`);
+      if (requestId !== fetchRequestIdRef.current) return;
+
+      const sceneVersion = Number(data?.scene_version || 0);
       const updatedAt = Number(data?.updated_at || 0);
-      if (!lastServerUpdateRef.current || updatedAt >= lastServerUpdateRef.current) {
-        lastServerUpdateRef.current = updatedAt;
+      const shouldApply =
+        !lastSceneSignatureRef.current ||
+        sceneVersion > lastSceneVersionRef.current ||
+        updatedAt > lastServerUpdateRef.current;
+
+      lastSceneVersionRef.current = Math.max(lastSceneVersionRef.current, sceneVersion);
+      lastServerUpdateRef.current = Math.max(lastServerUpdateRef.current, updatedAt);
+      hasLoadedInitialSceneRef.current = true;
+
+      if (shouldApply) {
         applyRemoteScene(data?.scene);
       }
+
       setSyncState("live");
       setLastSyncedAt(Date.now());
     } catch {
-      setSyncState("offline");
+      if (requestId === fetchRequestIdRef.current) {
+        hasLoadedInitialSceneRef.current = true;
+        setSyncState("offline");
+      }
     }
   }, [applyRemoteScene, roomCode]);
 
-  const pushSharedScene = useCallback(async (elements: readonly unknown[], files: Record<string, any>) => {
-    const scene = normalizeScene({ elements, files });
-    const signature = sceneSignature(scene);
+  const pushSharedScene = useCallback(async (elements: readonly unknown[], files: unknown) => {
+    const localScene = normalizeScene({ elements, files });
+    const signature = sceneSignature(localScene);
     if (signature === lastSceneSignatureRef.current) return;
 
+    const requestId = ++saveRequestIdRef.current;
     try {
       const data = await apiFetch(`/api/whiteboard/scene/${roomCode}`, {
         method: "PUT",
-        body: JSON.stringify({ scene }),
+        body: JSON.stringify({
+          scene: localScene,
+          base_version: lastSceneVersionRef.current,
+          actor_id: actorIdRef.current,
+        }),
       });
+      if (requestId !== saveRequestIdRef.current) return;
+
+      const sceneVersion = Number(data?.scene_version || 0);
+      const updatedAt = Number(data?.updated_at || Date.now());
+      lastSceneVersionRef.current = Math.max(lastSceneVersionRef.current, sceneVersion);
+      lastServerUpdateRef.current = Math.max(lastServerUpdateRef.current, updatedAt);
       lastSceneSignatureRef.current = signature;
-      lastServerUpdateRef.current = Number(data?.updated_at || Date.now());
+
+      if (data?.scene) {
+        applyRemoteScene(data.scene);
+      }
+
       setSyncState("live");
       setLastSyncedAt(Date.now());
     } catch {
-      setSyncState("offline");
+      if (requestId === saveRequestIdRef.current) {
+        setSyncState("offline");
+      }
     }
-  }, [normalizeScene, roomCode, sceneSignature]);
+  }, [applyRemoteScene, normalizeScene, roomCode, sceneSignature]);
 
-  const queueSceneSave = useCallback((elements: readonly unknown[], files: Record<string, any>) => {
+  const queueSceneSave = useCallback((elements: readonly unknown[], files: unknown) => {
+    if (!hasLoadedInitialSceneRef.current) return;
     if (applyingRemoteRef.current) return;
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
       pushSharedScene(elements, files);
-    }, 450);
+    }, 350);
   }, [pushSharedScene]);
+
+  useEffect(() => {
+    hasLoadedInitialSceneRef.current = false;
+    lastSceneSignatureRef.current = "";
+    lastServerUpdateRef.current = 0;
+    lastSceneVersionRef.current = 0;
+    fetchRequestIdRef.current = 0;
+    saveRequestIdRef.current = 0;
+    setSyncState("connecting");
+    setLastSyncedAt(null);
+  }, [roomCode]);
 
   useEffect(() => {
     if (!excalidrawAPI) return;
@@ -807,19 +981,30 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
     ws.onopen = () => setSyncState("live");
     ws.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data);
-        if (message?.type === "WHITEBOARD_UPDATED") {
-          const updatedAt = Number(message?.updated_at || 0);
-          if (updatedAt > lastServerUpdateRef.current) {
-            lastServerUpdateRef.current = updatedAt;
-            fetchSharedScene();
-          }
+        const message = JSON.parse(event.data) as Record<string, unknown>;
+        if (message?.type !== "WHITEBOARD_UPDATED") return;
+
+        const messageActorId = typeof message.actor_id === "string" ? message.actor_id : "";
+        const messageVersion = Number(message.scene_version || 0);
+        const messageUpdatedAt = Number(message.updated_at || 0);
+        const knownVersion = lastSceneVersionRef.current;
+        const knownUpdatedAt = lastServerUpdateRef.current;
+
+        if (messageActorId && messageActorId === actorIdRef.current) {
+          lastSceneVersionRef.current = Math.max(knownVersion, messageVersion);
+          lastServerUpdateRef.current = Math.max(knownUpdatedAt, messageUpdatedAt);
+          return;
         }
+        if (messageVersion <= knownVersion && messageUpdatedAt <= knownUpdatedAt) return;
+        fetchSharedScene();
       } catch {
         // ignore non-json socket traffic
       }
     };
     ws.onerror = () => setSyncState("offline");
+    ws.onclose = () => {
+      setSyncState((prev) => (prev === "offline" ? prev : "connecting"));
+    };
 
     return () => {
       window.clearInterval(pingInterval);
@@ -974,7 +1159,7 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
                 export: false,
               },
             }}
-            onChange={(elements: readonly unknown[], _appState: unknown, files: Record<string, any>) => {
+            onChange={(elements: readonly unknown[], _appState: unknown, files: unknown) => {
               queueSceneSave(elements, files || {});
             }}
           />
