@@ -26,25 +26,26 @@ export const Board = () => {
 
   useEffect(() => {
     if (roomCode) {
-      fetch(`http://localhost:8000/api/board/${roomCode}`)
-        .then(res => res.json())
-        .then(data => setTasks(data.tasks));
-    }
-  }, [roomCode]);
+      fetch(`${import.meta.env.VITE_API_BASE_URL}/api/board/${roomCode}`)
+          .then(res => res.json())
+          .then(data => setTasks(data.tasks));
+      }
+      }, [roomCode]);
 
-  const onDragEnd = (event: any) => {
-    const { active, over } = event;
-    if (!over) return;
-    
-    const taskId = active.id;
-    const newColumn = over.id;
-    const task = tasks.find(t => t.id === taskId);
-    if (task && task.column !== newColumn) {
-        // Optimistic update
-        setTasks(prev => prev.map(t => t.id === taskId ? {...t, column: newColumn} : t));
-        // API Call
-        fetch(`http://localhost:8000/api/task/${taskId}?room_id=${roomCode}`, {
-            method: 'PUT',
+      const onDragEnd = (event: any) => {
+      const { active, over } = event;
+      if (!over) return;
+
+      const taskId = active.id;
+      const newColumn = over.id;
+      const task = tasks.find(t => t.id === taskId);
+      if (task && task.column !== newColumn) {
+      // Optimistic update
+      setTasks(prev => prev.map(t => t.id === taskId ? {...t, column: newColumn} : t));
+      // API Call
+      fetch(`${import.meta.env.VITE_API_BASE_URL}/api/task/${taskId}?room_id=${roomCode}`, {
+          method: 'PUT',
+
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({...task, column: newColumn})
         });

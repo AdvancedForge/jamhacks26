@@ -6,7 +6,7 @@ export const useBoardWebSocket = (roomCode: string | null, onMessage: (message: 
   useEffect(() => {
     if (!roomCode) return;
 
-    ws.current = new WebSocket(`ws://localhost:8000/ws/board/${roomCode}`);
+    ws.current = new WebSocket(`${import.meta.env.VITE_WS_BASE_URL}/ws/board/${roomCode}`);
 
     ws.current.onmessage = (event) => {
       const data = JSON.parse(event.data);

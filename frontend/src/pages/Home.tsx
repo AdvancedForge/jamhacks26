@@ -9,7 +9,7 @@ export const Home = () => {
 
   const handleAction = async (create: boolean) => {
     if (create) {
-        const res = await fetch('http://localhost:8000/api/room/create', { method: 'POST' });
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/room/create`, { method: 'POST' });
         const data = await res.json();
         setRoomCode(data.room_id);
     } else {
