@@ -17,7 +17,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # For development, adjust to specific frontend URL in production
+    allow_origins=["https://jamhacks26.vercel.app", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -70,6 +70,13 @@ manager = ConnectionManager()
 
 @app.websocket("/ws/board/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
+    # Manually check origin during handshake to resolve potential WebSocket CORS issues
+    origin = websocket.headers.get("origin")
+    allowed_origins = ["https://jamhacks26.vercel.app", "http://localhost:5173"]
+    if origin not in allowed_origins:
+        await websocket.close(code=1008) # Policy Violation
+        return
+
     await manager.connect(room_id, websocket)
     try:
         while True:
