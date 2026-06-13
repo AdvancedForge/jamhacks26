@@ -35,11 +35,26 @@ class Task(BaseModel):
     created_at: int
     git_linked: Optional[str] = None
 
+import os
+import logging
+import random
+import string
+from fastapi import FastAPI, HTTPException
+# ... (rest of imports)
+
 # --- Kanban Endpoints ---
 
 @app.post("/api/room/create")
 async def create_room():
-    return {"room_id": "HB-4X9Z"}
+    # Generate a random 4-char alphanumeric string
+    room_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    
+    if await is_db_connected():
+        await db.rooms.insert_one({"room_id": room_id, "created_at": "now"})
+        return {"room_id": room_id}
+    else:
+        # Fallback
+        return {"room_id": room_id}
 
 @app.get("/api/board/{room_id}")
 async def get_board(room_id: str):
@@ -95,3 +110,58 @@ async def delete_task(task_id: str):
     if await is_db_connected():
         await db.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"deleted": True}})
     return {"ok": True}
+
+# --- Whiteboard Endpoints ---
+
+@app.post("/api/whiteboard/generate")
+async def generate_whiteboard(room_id: str, data: dict):
+    job = {"room_id": room_id, "status": "processing", "code": None}
+    if await is_db_connected():
+        result = await db.whiteboard_jobs.insert_one(job)
+        return {"job_id": str(result.inserted_id)}
+    return {"job_id": "job_wb_mock_001"}
+
+@app.get("/api/whiteboard/{job_id}")
+async def get_whiteboard_job(job_id: str):
+    if await is_db_connected():
+        job = await db.whiteboard_jobs.find_one({"_id": ObjectId(job_id)})
+        if job:
+            return {"status": job["status"], "code": job.get("code"), "framework": job.get("framework")}
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "completed", "code": "export default function GeneratedLayout() { return <div>Mock Code</div> }", "framework": "react"}
+
+# --- Git Endpoints ---
+
+@app.get("/api/git/{room_id}")
+async def get_git_commits(room_id: str):
+    if await is_db_connected():
+        commits = await db.git_events.find({"room_id": room_id}).to_list(length=50)
+        for commit in commits:
+            commit["id"] = str(commit.pop("_id"))
+        return {"commits": commits}
+    return {"commits": []}
+
+@app.post("/api/git/{room_id}/connect")
+async def connect_git(room_id: str):
+    if await is_db_connected():
+        await db.rooms.update_one({"room_id": room_id}, {"$set": {"git_connected": True}}, upsert=True)
+    return {"ok": True}
+
+# --- Voice Endpoints ---
+
+@app.post("/api/voice/speak")
+async def speak_summary(room_id: str):
+    job = {"room_id": room_id, "status": "processing"}
+    if await is_db_connected():
+        result = await db.voice_jobs.insert_one(job)
+        return {"job_id": str(result.inserted_id)}
+    return {"job_id": "job_voice_mock_001"}
+
+@app.get("/api/voice/{job_id}")
+async def get_voice_job(job_id: str):
+    if await is_db_connected():
+        job = await db.voice_jobs.find_one({"_id": ObjectId(job_id)})
+        if job:
+            return {"status": job["status"], "audio_url": job.get("audio_url")}
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "completed", "audio_url": "/static/voice/mock.mp3"}
