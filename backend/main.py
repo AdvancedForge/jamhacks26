@@ -421,6 +421,7 @@ def _chunk_chat_reply(text: str, max_chars: int = 28) -> List[str]:
 
 def _sanitize_chat_reply(raw_text: str, user_message: str = "") -> str:
     import re
+    logger.info(f"Sanitizing reply: {raw_text[:50]}...")
 
     if not raw_text:
         return ""
@@ -428,6 +429,7 @@ def _sanitize_chat_reply(raw_text: str, user_message: str = "") -> str:
 
     text = raw_text.replace("```", "").strip()
     if not text:
+        logger.info("Sanitized to empty after removing ```")
         return ""
 
     if text.lower().startswith("hackbuddy ai:"):
@@ -453,6 +455,7 @@ def _sanitize_chat_reply(raw_text: str, user_message: str = "") -> str:
     meta_detected = any(marker in text.lower() for marker in blocked_markers)
 
     if meta_detected:
+        logger.info(f"Meta-talk detected in: {text[:50]}...")
         quoted_candidates = re.findall(r"[\"“](.+?)[\"”]", text)
         for quoted in reversed(quoted_candidates):
             candidate = re.sub(r"\s+", " ", quoted).strip()
@@ -483,12 +486,15 @@ def _sanitize_chat_reply(raw_text: str, user_message: str = "") -> str:
 
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
+        logger.info("Sanitized to empty")
         return ""
 
     lowered = text.lower()
     if any(marker in lowered for marker in blocked_markers):
+        logger.info(f"Blocked marker detected in: {text[:50]}...")
         return ""
     if normalized_user_message and lowered == normalized_user_message.lower():
+        logger.info("Message matches user message")
         return ""
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
@@ -578,12 +584,12 @@ async def send_chat_message(
     try:
         prompt = (
             "You are HackBuddy AI, a project board assistant. "
-            "Analyze the message. "
+            "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
             'Return valid JSON: {"tasks": [...], "reply": "..."}. '
             '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates. If no tasks are needed, return an empty list []. '
-            '"reply" MUST be a conversational, helpful response to the user. '
-            'If you do not create tasks, still provide a meaningful conversational reply based on the message and board context. '
-            'Do NOT just say "Got your message!". '
+            '"reply" MUST be a direct, relevant answer to the user. If the user asks a question, answer it. '
+            'If the request is unclear, politely ask for clarification. '
+            'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
             "Do NOT include any other text, chain-of-thought, or prompt echoes."
         )
         
@@ -626,11 +632,11 @@ async def send_chat_message(
         # 2. Handle Reply
         ai_reply = result.get("reply") if result and isinstance(result, dict) else None
         if not ai_reply:
-            ai_reply = "I've processed your request. Is there anything else you need help with?"
+            ai_reply = "I'm not sure how to answer that, could you rephrase?"
         ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
     except Exception as e:
         logger.warning(f"AI error: {e}")
-        ai_reply = "I had trouble processing that, could you try phrasing it differently?"
+        ai_reply = "I'm having trouble answering that right now, could you please rephrase?"
 
     if not ai_reply:
         ai_reply = _safe_chat_fallback(chat.message, task_title)
