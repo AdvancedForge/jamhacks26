@@ -375,7 +375,7 @@ DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_GEMINI_MODEL", "gemma-4-31b-it")
 SUPPORTED_CHAT_MODELS = [
     "gemma-4-31b-it",
     "gemma-4-26b-a4b-it",
-    "gemini-3.1-flash-light",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
 ]
 CHAT_SYSTEM_INSTRUCTION = (
