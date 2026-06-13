@@ -32,4 +32,4 @@ export type Task = {
   deleted?: boolean;
 };
 
-export type AppPage = "Board" | "Whiteboard" | "Integrations" | "Roadmap";
+export type AppPage = "Kanban" | "Whiteboard" | "Integrations" | "Roadmap";

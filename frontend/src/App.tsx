@@ -12,14 +12,19 @@ import RoadmapPage from "./pages/Roadmap";
 
 export default function App() {
   const [roomCode, setRoomCode] = useState(() => localStorage.getItem("hb_room") || "");
-  const [page, setPage] = useState<AppPage>("Board");
+  const [page, setPage] = useState<AppPage>(() => (localStorage.getItem("hb_page") as AppPage) || "Kanban");
   const [polledAt, setPolledAt] = useState(Date.now());
   const { toasts, add: toast } = useToasts();
   const handlePoll = useCallback(() => setPolledAt(Date.now()), []);
 
   const handleEnter = (code: string) => {
     setRoomCode(code);
-    setPage("Board");
+    setPage("Kanban");
+  };
+
+  const handleNav = (newPage: AppPage) => {
+    setPage(newPage);
+    localStorage.setItem("hb_page", newPage);
   };
 
   if (!roomCode) {
@@ -47,10 +52,10 @@ export default function App() {
         .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
       `}</style>
 
-      <Topbar roomCode={roomCode} page={page} onNav={setPage} polledAt={polledAt} />
+      <Topbar roomCode={roomCode} page={page} onNav={handleNav} polledAt={polledAt} />
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {page === "Board" && <BoardPage roomCode={roomCode} toast={toast} onPoll={handlePoll} />}
+        {page === "Kanban" && <BoardPage roomCode={roomCode} toast={toast} onPoll={handlePoll} />}
         {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
         {page === "Integrations" && <IntegrationsPage roomCode={roomCode} toast={toast} />}
         {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
