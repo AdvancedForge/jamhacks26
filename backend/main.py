@@ -7,6 +7,7 @@ import string
 import time
 import traceback
 from typing import Any, Dict, List, Optional
+import requests
 
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -44,6 +45,7 @@ client = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
 db = client.hackbuddy
 mock_whiteboards: Dict[str, Dict[str, Any]] = {}
 mock_whiteboard_jobs: Dict[str, Dict[str, Any]] = {}
+mock_profiles: Dict[str, Dict[str, Any]] = {}
 
 
 # Helper to check if DB is connected
@@ -78,6 +80,35 @@ class WhiteboardScenePayload(BaseModel):
 class WhiteboardGeneratePayload(BaseModel):
     image_base64: str
     framework: Optional[str] = "react"
+
+
+class UserProfilePayload(BaseModel):
+    room_id: str
+    name: str
+    skills: List[str] = Field(default_factory=list)
+    interest: str
+    vibe: str
+
+
+class UserProfileIdeasPayload(BaseModel):
+    room_id: str
+    name: str
+    skills: List[str] = Field(default_factory=list)
+    interest: str
+    vibe: str
+    count: Optional[int] = 5
+
+
+class DiscordTeam8sPayload(BaseModel):
+    room_id: str
+    name: str
+    skills: List[str] = Field(default_factory=list)
+    interest: str
+    vibe: str
+    discord_handle: Optional[str] = None
+    looking_for: Optional[str] = None
+    availability: Optional[str] = None
+    webhook_url: Optional[str] = None
 
 
 def _to_int(value: Any) -> int:
@@ -316,6 +347,84 @@ def _build_whiteboard_generation_prompt(framework: str) -> str:
         "Return only code for a single file with no markdown fences and no extra commentary.\n"
         "If the sketch is ambiguous, make pragmatic assumptions and include brief TODO comments for unclear parts."
     )
+
+def _normalize_skill_list(skills: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw_skill in skills:
+        cleaned = " ".join(str(raw_skill or "").split()).strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(cleaned)
+    return normalized
+
+
+def _build_profile_summary(profile: Dict[str, Any]) -> str:
+    name = str(profile.get("name") or "").strip() or "Unknown"
+    interest = str(profile.get("interest") or "").strip() or "Not specified"
+    vibe = str(profile.get("vibe") or "").strip() or "Not specified"
+    skills = profile.get("skills") or []
+    normalized_skills = _normalize_skill_list(skills if isinstance(skills, list) else [])
+    skills_text = ", ".join(normalized_skills) if normalized_skills else "Not specified"
+    return f"Name: {name}. Skills: {skills_text}. Interest: {interest}. Vibe: {vibe}."
+
+
+async def _upsert_profile_record(
+    room_id: str,
+    name: str,
+    skills: List[str],
+    interest: str,
+    vibe: str,
+) -> Dict[str, Any]:
+    cleaned_name = " ".join(name.split()).strip()
+    if not cleaned_name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    cleaned_interest = " ".join((interest or "").split()).strip()
+    if not cleaned_interest:
+        raise HTTPException(status_code=400, detail="Interest is required")
+    cleaned_vibe = " ".join((vibe or "").split()).strip()
+    if not cleaned_vibe:
+        raise HTTPException(status_code=400, detail="Vibe is required")
+    normalized_skills = _normalize_skill_list(skills)
+    now = int(time.time() * 1000)
+    profile_doc = {
+        "room_id": room_id,
+        "name": cleaned_name,
+        "skills": normalized_skills,
+        "interest": cleaned_interest,
+        "vibe": cleaned_vibe,
+        "updated_at": now,
+    }
+    if await is_db_connected():
+        await db.user_profiles.update_one(
+            {"room_id": room_id, "name": cleaned_name},
+            {"$set": profile_doc},
+            upsert=True,
+        )
+    mock_profiles[room_id] = profile_doc
+    return profile_doc
+
+
+async def _get_room_profile(room_id: str) -> Optional[Dict[str, Any]]:
+    if await is_db_connected():
+        profile = await db.user_profiles.find_one(
+            {"room_id": room_id},
+            sort=[("updated_at", -1)],
+        )
+        if profile:
+            return {
+                "room_id": room_id,
+                "name": profile.get("name", ""),
+                "skills": profile.get("skills", []),
+                "interest": profile.get("interest", ""),
+                "vibe": profile.get("vibe", ""),
+                "updated_at": profile.get("updated_at"),
+            }
+    return mock_profiles.get(room_id)
 
 
 def _new_mock_whiteboard_job_id() -> str:
@@ -930,6 +1039,12 @@ async def send_chat_message(
                 ]
             )
             roadmap_content = board_data.get("roadmap", "No roadmap content.")
+            profile = await _get_room_profile(chat.room_id)
+            profile_summary = (
+                _build_profile_summary(profile)
+                if profile
+                else "No onboarding profile has been provided yet."
+            )
 
             prompt = (
                 "You are HackBuddy AI, a project board assistant. "
@@ -949,6 +1064,7 @@ async def send_chat_message(
             full_prompt = (
                 f"{prompt}\n\n"
                 f"--- Context ---\n"
+                f"User profile: {profile_summary}\n"
                 f"Whiteboard: {whiteboard_summary}\n"
                 f"Whiteboard image context: {whiteboard_image_hint}\n"
                 f"Tasks:\n{tasks_summary}\n"
@@ -1072,6 +1188,124 @@ async def send_chat_message(
         chat.room_id, {"type": "CHAT_MESSAGE", "message": final_ai_message}
     )
     return {"ok": True, "saved": db_connected, "model": final_ai_message["model"]}
+
+@app.post("/api/profile/upsert")
+async def upsert_profile(payload: UserProfilePayload):
+    profile_doc = await _upsert_profile_record(
+        room_id=payload.room_id,
+        name=payload.name,
+        skills=payload.skills,
+        interest=payload.interest,
+        vibe=payload.vibe,
+    )
+    return {"ok": True, "profile": profile_doc}
+
+
+@app.get("/api/profile/{room_id}")
+async def get_profile(room_id: str):
+    return {"profile": await _get_room_profile(room_id)}
+
+
+@app.post("/api/profile/ideas")
+async def generate_profile_ideas(payload: UserProfileIdeasPayload):
+    profile_doc = await _upsert_profile_record(
+        room_id=payload.room_id,
+        name=payload.name,
+        skills=payload.skills,
+        interest=payload.interest,
+        vibe=payload.vibe,
+    )
+    requested_count = min(max(int(payload.count or 5), 3), 8)
+    prompt = (
+        "You are a hackathon mentor. "
+        f"Given this profile, propose {requested_count} concrete project ideas. "
+        "Each idea must include: title, one-line pitch, and why this profile is a strong fit. "
+        "Keep each idea practical for a weekend build.\n"
+        f"Profile: {_build_profile_summary(profile_doc)}\n"
+        "Respond as valid JSON object: "
+        '{"ideas":[{"title":"...","pitch":"...","fit":"..."}]}'
+    )
+    try:
+        response = await chat_model.generate_content_async(prompt)
+        result = _extract_json_object(response.text)
+        ideas = result.get("ideas") if isinstance(result, dict) else None
+        if isinstance(ideas, list) and ideas:
+            cleaned_ideas: List[Dict[str, str]] = []
+            for idea in ideas:
+                if not isinstance(idea, dict):
+                    continue
+                cleaned_ideas.append(
+                    {
+                        "title": str(idea.get("title") or "Project Idea").strip(),
+                        "pitch": str(idea.get("pitch") or "").strip(),
+                        "fit": str(idea.get("fit") or "").strip(),
+                    }
+                )
+            if cleaned_ideas:
+                return {"ok": True, "ideas": cleaned_ideas[:requested_count]}
+    except Exception as error:
+        logger.warning(f"Profile idea generation fallback: {error}")
+    fallback = [
+        {
+            "title": f"{profile_doc['interest']} Sprint Planner",
+            "pitch": "Build a lightweight app that helps teams plan and ship weekend projects faster.",
+            "fit": f"Fits your {profile_doc['vibe']} vibe and uses your skills in {', '.join(profile_doc['skills']) or 'product building'}.",
+        },
+        {
+            "title": "Hackathon Team Matchmaker",
+            "pitch": "Match hackers by skills, goals, and preferred build style in real time.",
+            "fit": "Directly aligned with your onboarding profile and team-collab interest.",
+        },
+        {
+            "title": "Idea-to-MVP Generator",
+            "pitch": "Turn rough interests into scoped MVP checklists and architecture starters.",
+            "fit": "Leverages your skills while keeping ideation practical for fast builds.",
+        },
+    ]
+    return {"ok": True, "ideas": fallback[:requested_count]}
+
+
+@app.post("/api/discord/team8s")
+async def post_discord_team8s(payload: DiscordTeam8sPayload):
+    profile_doc = await _upsert_profile_record(
+        room_id=payload.room_id,
+        name=payload.name,
+        skills=payload.skills,
+        interest=payload.interest,
+        vibe=payload.vibe,
+    )
+    handle = (payload.discord_handle or "").strip()
+    looking_for = (payload.looking_for or "frontend/backend/design teammates").strip()
+    availability = (payload.availability or "active this weekend").strip()
+    skills_line = ", ".join(profile_doc["skills"]) if profile_doc["skills"] else "generalist"
+    profile_line = (
+        f"🚀 **Team8s Finder**\n"
+        f"**Name:** {profile_doc['name']}\n"
+        f"**Interest:** {profile_doc['interest']}\n"
+        f"**Vibe:** {profile_doc['vibe']}\n"
+        f"**Skills:** {skills_line}\n"
+        f"**Looking For:** {looking_for}\n"
+        f"**Availability:** {availability}\n"
+        f"**Room:** `{payload.room_id}`"
+    )
+    if handle:
+        profile_line += f"\n**Discord:** {handle}"
+    webhook_url = (payload.webhook_url or os.getenv("DISCORD_TEAM8_WEBHOOK_URL") or "").strip()
+    posted = False
+    error: Optional[str] = None
+    if webhook_url:
+        try:
+            response = requests.post(
+                webhook_url,
+                json={"content": profile_line},
+                timeout=8,
+            )
+            posted = 200 <= response.status_code < 300
+            if not posted:
+                error = f"Discord webhook rejected payload ({response.status_code})."
+        except Exception as webhook_error:
+            error = f"Discord webhook failed: {webhook_error}"
+    return {"ok": True, "posted": posted, "preview": profile_line, "error": error}
 
 
 # --- Kanban Endpoints ---
