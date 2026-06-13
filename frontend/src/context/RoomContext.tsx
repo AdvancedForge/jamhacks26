@@ -1,4 +1,4 @@
-import { createContext, useState, ReactNode } from 'react';
+import { createContext, useState, type ReactNode } from 'react';
 
 export const RoomContext = createContext<{ roomCode: string | null; setRoomCode: (code: string) => void }>({
   roomCode: null,

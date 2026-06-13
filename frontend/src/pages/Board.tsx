@@ -1,6 +1,5 @@
 import { useState, useContext, useEffect } from 'react';
 import { DndContext, closestCenter } from '@dnd-kit/core';
-import { arrayMove } from '@dnd-kit/sortable';
 import { RoomContext } from '../context/RoomContext';
 import { useBoardWebSocket } from '../hooks/useBoardWebSocket';
 import { KanbanColumn } from '../components/KanbanColumn';
