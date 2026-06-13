@@ -227,12 +227,13 @@ class ChatMessage(BaseModel):
     message: str
 
 import google.generativeai as genai
+import base64
 
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# ... (Chat Endpoint)
+# --- Chat Endpoints ---
 
 @app.post("/api/chat/message")
 async def send_chat_message(chat: ChatMessage):
@@ -266,6 +267,8 @@ async def send_chat_message(chat: ChatMessage):
             
         return {"ok": True}
     return {"ok": False}
+
+# --- Kanban Endpoints ---
 
 @app.post("/api/room/create")
 async def create_room():
@@ -454,6 +457,36 @@ async def generate_whiteboard(room_id: str, data: dict):
         result = await db.whiteboard_jobs.insert_one(job)
         return {"job_id": str(result.inserted_id)}
     return {"job_id": "job_wb_mock_001"}
+
+@app.post("/api/whiteboard/analyze")
+async def analyze_whiteboard(room_id: str, data: dict):
+    if not await is_db_connected():
+        return {"ok": False, "error": "Database unavailable"}
+        
+    image_b64 = data.get("image_base64")
+    if not image_b64:
+        raise HTTPException(status_code=400, detail="Missing image_base64")
+
+    # Prepare image for Gemini
+    image_data = base64.b64decode(image_b64.split(",")[1])
+    
+    try:
+        # Use Gemini Vision
+        response = await model.generate_content_async([
+            "Analyze this whiteboard sketch. Provide brief, actionable feedback or suggestions for improvement.",
+            {"mime_type": "image/png", "data": image_data}
+        ])
+        
+        feedback = response.text
+        
+        # Post feedback to chat using the unified chat mechanism
+        chat = ChatMessage(room_id=room_id, sender="AI Whiteboard Assistant", message=feedback)
+        await send_chat_message(chat)
+        
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"AI analysis error: {e}")
+        raise HTTPException(status_code=500, detail="AI analysis failed")
 
 @app.get("/api/whiteboard/{job_id}")
 async def get_whiteboard_job(job_id: str):
