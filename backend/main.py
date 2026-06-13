@@ -580,6 +580,8 @@ async def send_chat_message(
 
     task_title: Optional[str] = None
 
+    # Unified AI Intent and Reply
+    try:
         # Fetch board data
         board_data = await get_board(chat.room_id)
         
@@ -646,7 +648,7 @@ async def send_chat_message(
         if result and "roadmap" in result and isinstance(result["roadmap"], str):
             await update_roadmap(chat.room_id, {"roadmap": result["roadmap"]})
 
-        # 2. Handle Reply
+        # 3. Handle Reply
         ai_reply = result.get("reply") if result and isinstance(result, dict) else None
         if not ai_reply:
             ai_reply = "I'm not sure how to answer that, could you rephrase?"
