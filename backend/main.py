@@ -3,11 +3,12 @@ import logging
 import random
 import string
 import traceback
+import time
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -31,6 +32,7 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 # Use a short timeout for the initial connection check
 client = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
 db = client.hackbuddy
+mock_whiteboards: Dict[str, Dict[str, Any]] = {}
 
 # Helper to check if DB is connected
 async def is_db_connected():
@@ -53,6 +55,9 @@ class Task(BaseModel):
     updated_at: Optional[int] = None
     git_linked: Optional[str] = None
 
+class WhiteboardScenePayload(BaseModel):
+    scene: Dict[str, Any] = Field(default_factory=dict)
+
 # --- WebSocket ---
 class ConnectionManager:
     def __init__(self):
@@ -63,25 +68,50 @@ class ConnectionManager:
         if room_id not in self.active_connections:
             self.active_connections[room_id] = []
         self.active_connections[room_id].append(websocket)
+        logger.info(f"WebSocket connected: room={room_id}, total={len(self.active_connections[room_id])}")
 
     def disconnect(self, room_id: str, websocket: WebSocket):
-        self.active_connections[room_id].remove(websocket)
+        try:
+            if room_id in self.active_connections:
+                if websocket in self.active_connections[room_id]:
+                    self.active_connections[room_id].remove(websocket)
+                    logger.info(f"WebSocket disconnected: room={room_id}")
+        except Exception as e:
+            logger.error(f"Error during disconnect: {e}")
 
     async def broadcast(self, room_id: str, message: dict):
-        if room_id in self.active_connections:
-            for connection in self.active_connections[room_id]:
+        if room_id not in self.active_connections:
+            return
+        
+        dead_connections = []
+        for connection in self.active_connections[room_id]:
+            try:
                 await connection.send_json(message)
+                logger.info(f"Broadcast sent to room={room_id}: {message.get('type')}")
+            except Exception as e:
+                logger.error(f"Failed to send to WebSocket: {e}")
+                dead_connections.append(connection)
+        
+        # Clean up dead connections
+        for dead in dead_connections:
+            try:
+                self.active_connections[room_id].remove(dead)
+            except:
+                pass
 
 manager = ConnectionManager()
 
 @app.websocket("/ws/board/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
-    # Relaxed origin check: accepting all origins
     await manager.connect(room_id, websocket)
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            logger.info(f"WebSocket received from room={room_id}: {data[:100] if data else 'empty'}")
     except WebSocketDisconnect:
+        manager.disconnect(room_id, websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
         manager.disconnect(room_id, websocket)
 
 # --- Kanban Endpoints ---
@@ -174,6 +204,49 @@ async def delete_task(room_id: str, task_id: str):
     return {"ok": True}
 
 # --- Whiteboard Endpoints ---
+
+@app.get("/api/whiteboard/scene/{room_id}")
+async def get_whiteboard_scene(room_id: str):
+    default_scene = {"elements": [], "files": {}}
+    now = int(time.time() * 1000)
+
+    if await is_db_connected():
+        board = await db.whiteboards.find_one({"room_id": room_id})
+        if not board:
+            board = {"room_id": room_id, "scene": default_scene, "updated_at": now}
+            await db.whiteboards.insert_one(board)
+        return {
+            "scene": board.get("scene", default_scene),
+            "updated_at": board.get("updated_at", now),
+        }
+
+    if room_id not in mock_whiteboards:
+        mock_whiteboards[room_id] = {"scene": default_scene, "updated_at": now}
+    return mock_whiteboards[room_id]
+
+@app.put("/api/whiteboard/scene/{room_id}")
+async def save_whiteboard_scene(room_id: str, payload: WhiteboardScenePayload):
+    now = int(time.time() * 1000)
+    scene = payload.scene or {}
+
+    if not isinstance(scene.get("elements"), list):
+        scene["elements"] = []
+    if not isinstance(scene.get("files"), dict):
+        scene["files"] = {}
+
+    saved = {"scene": scene, "updated_at": now}
+
+    if await is_db_connected():
+        await db.whiteboards.update_one(
+            {"room_id": room_id},
+            {"$set": {"scene": scene, "updated_at": now}},
+            upsert=True,
+        )
+    else:
+        mock_whiteboards[room_id] = saved
+
+    await manager.broadcast(room_id, {"type": "WHITEBOARD_UPDATED", "updated_at": now})
+    return {"ok": True, **saved}
 
 @app.post("/api/whiteboard/generate")
 async def generate_whiteboard(room_id: str, data: dict):

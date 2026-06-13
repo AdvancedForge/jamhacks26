@@ -16,6 +16,11 @@ const API_BASE =
   import.meta.env.VITE_API_BASE_URL ||
   "http://localhost:8000";
 
+const WS_BASE = (import.meta.env.VITE_WS_BASE_URL || API_BASE)
+  .replace(/^http:\/\//i, "ws://")
+  .replace(/^https:\/\//i, "wss://")
+  .replace(/\/$/, "");
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function hashColor(str: string) {
@@ -577,7 +582,8 @@ function BoardPage({ roomCode, toast, onPoll }: { roomCode: string; toast: (msg:
         body: JSON.stringify({ title, description, column, assignee: "", created_at: now }),
       });
       toast(`Task added to ${column}`);
-      await fetchBoard();
+      // Refresh board silently - errors handled by polling
+      fetchBoard().catch(() => {});
     } catch {
       toast("Failed to save task.", "error");
     }
@@ -713,6 +719,119 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
   const [status, setStatus] = useState<string>("idle"); // idle | loading | done | error
   const [code, setCode] = useState<string>("");
   const [excalidrawAPI, setExcalidrawAPI] = useState<any>(null);
+  const [syncState, setSyncState] = useState<"connecting" | "live" | "offline">("connecting");
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const applyingRemoteRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
+  const lastSceneSignatureRef = useRef("");
+  const lastServerUpdateRef = useRef(0);
+
+  const normalizeScene = useCallback((scene: any) => {
+    const elements: readonly unknown[] = Array.isArray(scene?.elements) ? scene.elements : [];
+    const files = scene?.files && typeof scene.files === "object" ? scene.files : {};
+    return { elements, files };
+  }, []);
+  const sceneSignature = useCallback((scene: { elements: readonly unknown[]; files: Record<string, any> }) => {
+    return JSON.stringify({ elements: scene.elements, files: scene.files });
+  }, []);
+
+  const applyRemoteScene = useCallback((scene: any) => {
+    if (!excalidrawAPI) return;
+    const normalized = normalizeScene(scene);
+    const signature = sceneSignature(normalized);
+    if (signature === lastSceneSignatureRef.current) return;
+
+    applyingRemoteRef.current = true;
+    excalidrawAPI.updateScene(normalized);
+    lastSceneSignatureRef.current = signature;
+    window.setTimeout(() => {
+      applyingRemoteRef.current = false;
+    }, 0);
+  }, [excalidrawAPI, normalizeScene, sceneSignature]);
+
+  const fetchSharedScene = useCallback(async () => {
+    try {
+      const data = await apiFetch(`/api/whiteboard/scene/${roomCode}`);
+      const updatedAt = Number(data?.updated_at || 0);
+      if (!lastServerUpdateRef.current || updatedAt >= lastServerUpdateRef.current) {
+        lastServerUpdateRef.current = updatedAt;
+        applyRemoteScene(data?.scene);
+      }
+      setSyncState("live");
+      setLastSyncedAt(Date.now());
+    } catch {
+      setSyncState("offline");
+    }
+  }, [applyRemoteScene, roomCode]);
+
+  const pushSharedScene = useCallback(async (elements: readonly unknown[], files: Record<string, any>) => {
+    const scene = normalizeScene({ elements, files });
+    const signature = sceneSignature(scene);
+    if (signature === lastSceneSignatureRef.current) return;
+
+    try {
+      const data = await apiFetch(`/api/whiteboard/scene/${roomCode}`, {
+        method: "PUT",
+        body: JSON.stringify({ scene }),
+      });
+      lastSceneSignatureRef.current = signature;
+      lastServerUpdateRef.current = Number(data?.updated_at || Date.now());
+      setSyncState("live");
+      setLastSyncedAt(Date.now());
+    } catch {
+      setSyncState("offline");
+    }
+  }, [normalizeScene, roomCode, sceneSignature]);
+
+  const queueSceneSave = useCallback((elements: readonly unknown[], files: Record<string, any>) => {
+    if (applyingRemoteRef.current) return;
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      pushSharedScene(elements, files);
+    }, 450);
+  }, [pushSharedScene]);
+
+  useEffect(() => {
+    if (!excalidrawAPI) return;
+    fetchSharedScene();
+    const poll = window.setInterval(fetchSharedScene, 2500);
+    return () => window.clearInterval(poll);
+  }, [excalidrawAPI, fetchSharedScene]);
+
+  useEffect(() => {
+    const ws = new WebSocket(`${WS_BASE}/ws/board/${roomCode}`);
+    const pingInterval = window.setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+    }, 25000);
+
+    ws.onopen = () => setSyncState("live");
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message?.type === "WHITEBOARD_UPDATED") {
+          const updatedAt = Number(message?.updated_at || 0);
+          if (updatedAt > lastServerUpdateRef.current) {
+            lastServerUpdateRef.current = updatedAt;
+            fetchSharedScene();
+          }
+        }
+      } catch {
+        // ignore non-json socket traffic
+      }
+    };
+    ws.onerror = () => setSyncState("offline");
+
+    return () => {
+      window.clearInterval(pingInterval);
+      ws.close();
+    };
+  }, [fetchSharedScene, roomCode]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    };
+  }, []);
 
   const handleGenerate = async () => {
     if (!excalidrawAPI) { toast("Canvas not ready.", "warn"); return; }
@@ -785,6 +904,16 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
     a.download = `GeneratedLayout.${ext}`;
     a.click();
   };
+  const syncStatusDotClass =
+    syncState === "offline"
+      ? "bg-[#ef4444] shadow-[0_0_8px_rgba(239,68,68,0.55)]"
+      : "bg-[#22c55e] shadow-[0_0_8px_rgba(34,197,94,0.55)]";
+  const syncStatusText =
+    syncState === "offline"
+      ? "Shared sync offline"
+      : lastSyncedAt
+        ? `Shared board synced ${timeAgo(lastSyncedAt)}`
+        : "Connecting shared board…";
 
 
   return (
@@ -820,9 +949,15 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
           )}
           Generate code
         </button>
-        <span className="text-[12px] text-[#52525b] ml-auto">
-          Draw a UI sketch, then generate {framework === "react" ? "React" : "HTML"} code
-        </span>
+        <div className="ml-auto flex items-center gap-4">
+          <span className="text-[12px] text-[#52525b] flex items-center gap-2">
+            <span className={`w-1.5 h-1.5 rounded-full ${syncStatusDotClass}`} />
+            {syncStatusText}
+          </span>
+          <span className="text-[12px] text-[#52525b]">
+            Draw a UI sketch, then generate {framework === "react" ? "React" : "HTML"} code
+          </span>
+        </div>
       </div>
 
       {/* split pane */}
@@ -838,6 +973,9 @@ function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: (msg: Re
                 saveToActiveFile: false,
                 export: false,
               },
+            }}
+            onChange={(elements: readonly unknown[], _appState: unknown, files: Record<string, any>) => {
+              queueSceneSave(elements, files || {});
             }}
           />
         </div>
