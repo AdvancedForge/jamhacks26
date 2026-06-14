@@ -1115,6 +1115,14 @@ CHAT_SYSTEM_INSTRUCTION = (
     "CRITICAL: Do NOT output any chain-of-thought, thinking process, planning, "
     "role descriptions, or bullet points. Output ONLY the direct response to the user."
 )
+BOARD_ACTION_SYSTEM_INSTRUCTION = (
+    "You are HackBuddy AI's board-action engine. "
+    "Always return ONLY a valid JSON object with keys: tasks, reply, roadmap. "
+    "\"tasks\" must be an array of task objects. Include \"id\" only when updating an existing task. "
+    "\"reply\" must be concise user-facing text. "
+    "\"roadmap\" must be either null or an object with keys \"vision\" and \"phases\". "
+    "Never wrap the JSON in markdown fences and never include extra commentary."
+)
 model = genai.GenerativeModel(DEFAULT_CHAT_MODEL)
 chat_model = genai.GenerativeModel(
     DEFAULT_CHAT_MODEL, system_instruction=(CHAT_SYSTEM_INSTRUCTION)
@@ -1248,17 +1256,19 @@ def _generate_custom_provider_reply(
     api_key: str,
     model_name: str,
     prompt: str,
+    system_instruction: Optional[str] = CHAT_SYSTEM_INSTRUCTION,
 ) -> str:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    messages: List[Dict[str, str]] = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
     payload = {
         "model": model_name,
-        "messages": [
-            {"role": "system", "content": CHAT_SYSTEM_INSTRUCTION},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
         "temperature": 0.4,
     }
     response = requests.post(request_url, json=payload, headers=headers, timeout=45)
@@ -1479,6 +1489,38 @@ def _safe_chat_fallback(user_message: str, task_title: Optional[str] = None) -> 
     return "Got your message. I can help break this into clear next tasks."
 
 
+def _build_ai_operation_failure_message(
+    reason: str, *, partial_changes: bool = False
+) -> str:
+    cleaned_reason = " ".join(str(reason or "").split()).strip().rstrip(".")
+    if not cleaned_reason:
+        cleaned_reason = "an internal AI processing error occurred"
+    if partial_changes:
+        return (
+            f"I hit an issue while applying your request: {cleaned_reason}. "
+            "Some changes may already be applied; please review the board."
+        )
+    return (
+        f"I couldn't apply your request: {cleaned_reason}. "
+        "No task or roadmap changes were applied."
+    )
+
+
+def _summarize_operation_issues(
+    issues: List[str], *, partial_changes: bool = False
+) -> str:
+    compact_issues: List[str] = []
+    for issue in issues:
+        cleaned = " ".join(str(issue or "").split()).strip()
+        if not cleaned or cleaned in compact_issues:
+            continue
+        compact_issues.append(cleaned)
+        if len(compact_issues) >= 3:
+            break
+    reason = "; ".join(compact_issues) if compact_issues else "unknown mutation failure"
+    return _build_ai_operation_failure_message(reason, partial_changes=partial_changes)
+
+
 # --- Chat Endpoints ---
 @app.get("/api/chat/models")
 async def get_chat_models(x_ai_models: Optional[str] = Header(None)):
@@ -1539,6 +1581,10 @@ async def send_chat_message(
             ),
         )
     thinking_started = False
+    selected_model = _resolve_chat_model_name(chat.model or x_gemini_model)
+    db_connected = False
+    task_title: Optional[str] = None
+    ai_model_used = selected_model
     try:
         custom_models = _parse_model_list(x_ai_models)
         custom_api_key = (x_ai_api_key or "").strip()
@@ -1549,14 +1595,15 @@ async def send_chat_message(
                 chat.model or x_gemini_model, custom_models
             )
             validated_request_url = _validate_custom_request_url(custom_request_url)
-            _intent_model = None
-            reply_model = None
+            planner_model = None
+            _reply_model = None
         else:
             _enforce_shared_key_rate_limit(chat.room_id, chat.sender)
-            selected_model, _intent_model, reply_model = _create_chat_models(
+            selected_model, planner_model, _reply_model = _create_chat_models(
                 chat.model or x_gemini_model
             )
             validated_request_url = ""
+        ai_model_used = selected_model
 
         db_connected = await is_db_connected()
         message_dict = chat.model_dump(
@@ -1582,9 +1629,6 @@ async def send_chat_message(
         )
         await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": True})
         thinking_started = True
-
-        task_title: Optional[str] = None
-        ai_model_used = selected_model
 
         try:
             whiteboard_image_part: Optional[Dict[str, Any]] = None
@@ -1623,6 +1667,7 @@ async def send_chat_message(
                         api_key=custom_api_key,
                         model_name=selected_model,
                         prompt=whiteboard_prompt,
+                        system_instruction=None,
                     )
                 elif whiteboard_image_part:
                     whiteboard_generation_model, _ = _create_whiteboard_models()
@@ -1644,7 +1689,9 @@ async def send_chat_message(
                         f"Whiteboard summary: {whiteboard_summary}\n"
                         f"Generate simple {target} code. Return only code and no explanation."
                     )
-                    response = await reply_model.generate_content_async(fallback_prompt)
+                    response = await (planner_model or model).generate_content_async(
+                        fallback_prompt
+                    )
                     ai_reply = _strip_markdown_code_fences(response.text)
                 if not ai_reply:
                     ai_reply = (
@@ -1682,21 +1729,15 @@ async def send_chat_message(
                 )
 
                 prompt = (
-                    "You are HackBuddy AI, a project board assistant. "
-                    "You have access to the project board tasks and the roadmap. "
-                    "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
-                    'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": {"vision": "...", "phases": {"Phase Name": ["task_id_1"]}}}. '
-                    '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
-                    '"roadmap" must be a JSON object with "vision" (a comprehensive Markdown document explaining the project in detail) and "phases" (dictionary mapping phase names to arrays of task IDs). '
-                    'Example: {"vision": "# Project Title\\n\\n## Vision\\n...detailed project description...", "phases": {"Phase 1": ["t_1"], "Phase 2": ["t_2"]}}. '
-                    'Only return this if changes are explicitly requested. If a task ID exists in board tasks but is NOT in any phase, it is "Unassigned". '
-                    '"reply" MUST be a direct, relevant answer to the user. '
-                    'When setting "assignee" for tasks, use ONLY names from the provided team member list. '
-                    "If the user asks a question, answer it based on the provided tasks and roadmap. "
-                    "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
-                    "If the request is unclear, politely ask for clarification. "
-                    'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
-                    "Do NOT include any other text, chain-of-thought, or prompt echoes."
+                    "You are HackBuddy AI's board-action engine. "
+                    "Read the context and return STRICT JSON only, with no markdown fences and no extra text. "
+                    'Required JSON schema: {"tasks": [...], "reply": "...", "roadmap": null|{"vision":"...","phases":{...}}}. '
+                    '"tasks" must be ONLY new tasks to create or existing tasks to update (updates must include "id"). '
+                    'If no task changes are needed, return "tasks": []. '
+                    '"roadmap" must be null unless the user explicitly requested roadmap changes. '
+                    '"reply" must be a direct user-facing response summarizing what was done or why no change was made. '
+                    'When setting "assignee", use only names from the provided team member list. '
+                    "If the request is unclear, set no mutations and ask for clarification in reply."
                 )
 
                 full_prompt = (
@@ -1719,13 +1760,16 @@ async def send_chat_message(
                         api_key=custom_api_key,
                         model_name=selected_model,
                         prompt=full_prompt,
+                        system_instruction=BOARD_ACTION_SYSTEM_INSTRUCTION,
                     )
                 else:
                     generation_payload: Any = full_prompt
                     if whiteboard_image_part:
                         generation_payload = [full_prompt, whiteboard_image_part]
                     try:
-                        response = await reply_model.generate_content_async(generation_payload)
+                        response = await (planner_model or model).generate_content_async(
+                            generation_payload
+                        )
                     except Exception as multimodal_error:
                         if not whiteboard_image_part:
                             raise
@@ -1733,62 +1777,127 @@ async def send_chat_message(
                             "Primary chat model could not use whiteboard image, retrying with vision model: "
                             f"{multimodal_error}"
                         )
-                        _, whiteboard_reply_model = _create_whiteboard_models()
-                        response = await whiteboard_reply_model.generate_content_async(
+                        whiteboard_generation_model, _ = _create_whiteboard_models()
+                        response = await whiteboard_generation_model.generate_content_async(
                             generation_payload
                         )
                         ai_model_used = WHITEBOARD_VISION_MODEL
                     response_text = response.text
 
                 result = _extract_json_object(response_text)
-                if result and "tasks" in result and isinstance(result["tasks"], list):
+                operation_issues: List[str] = []
+                applied_changes = False
+                if not result:
+                    raw_preview = _strip_markdown_code_fences(response_text)
+                    if len(raw_preview) > 180:
+                        raw_preview = raw_preview[:177].rstrip() + "..."
+                    reason = "AI response was not valid JSON"
+                    if raw_preview:
+                        reason = f"{reason} (raw output preview: {raw_preview})"
+                    ai_reply = _build_ai_operation_failure_message(reason)
+                else:
+                    raw_tasks = result.get("tasks", [])
+                    if not isinstance(raw_tasks, list):
+                        operation_issues.append('field "tasks" must be an array')
+                        raw_tasks = []
+
+                    raw_roadmap = result.get("roadmap", None)
+                    roadmap_payload: Optional[Dict[str, Any]]
+                    if raw_roadmap is None:
+                        roadmap_payload = None
+                    elif isinstance(raw_roadmap, dict):
+                        roadmap_payload = raw_roadmap
+                    else:
+                        roadmap_payload = None
+                        operation_issues.append('field "roadmap" must be an object or null')
+
                     member_names_for_assignment = [
                         str(member.get("name", "")).strip()
                         for member in room_members
                         if str(member.get("name", "")).strip()
                     ]
-                    for task_data in result["tasks"]:
+
+                    for task_index, task_data in enumerate(raw_tasks):
+                        if not isinstance(task_data, dict):
+                            operation_issues.append(
+                                f"tasks[{task_index}] is not a valid object"
+                            )
+                            continue
+
                         normalized_assignee = _normalize_assignee_name(
                             task_data.get("assignee"), member_names_for_assignment
                         )
-                        if "id" in task_data:
-                            task = Task(
-                                title=str(task_data.get("title") or "Untitled Task"),
-                                description=str(task_data.get("description") or ""),
-                                column=str(task_data.get("column") or "Backlog"),
-                                assignee=normalized_assignee or "",
-                                updated_at=int(time.time() * 1000),
+                        try:
+                            task_id = str(task_data.get("id") or "").strip()
+                            if task_id:
+                                task = Task(
+                                    title=str(task_data.get("title") or "Untitled Task"),
+                                    description=str(task_data.get("description") or ""),
+                                    column=str(task_data.get("column") or "Backlog"),
+                                    assignee=normalized_assignee or "",
+                                    updated_at=int(time.time() * 1000),
+                                )
+                                await update_task(chat.room_id, task_id, task)
+                            else:
+                                task = Task(
+                                    title=str(task_data.get("title") or "Untitled Task"),
+                                    description=str(task_data.get("description") or ""),
+                                    column=str(task_data.get("column") or "Backlog"),
+                                    assignee=normalized_assignee or "",
+                                    created_at=int(time.time() * 1000),
+                                )
+                                created_task = await create_task(chat.room_id, task)
+                                if (
+                                    not task_title
+                                    and isinstance(created_task, dict)
+                                    and isinstance(created_task.get("title"), str)
+                                ):
+                                    created_title = created_task.get("title", "").strip()
+                                    if created_title:
+                                        task_title = created_title
+                            applied_changes = True
+                        except Exception as task_error:
+                            operation_issues.append(
+                                f"failed to apply tasks[{task_index}]: {task_error}"
                             )
-                            await update_task(chat.room_id, task_data["id"], task)
-                        else:
-                            task = Task(
-                                title=str(task_data.get("title") or "Untitled Task"),
-                                description=str(task_data.get("description") or ""),
-                                column=str(task_data.get("column") or "Backlog"),
-                                assignee=normalized_assignee or "",
-                                created_at=int(time.time() * 1000),
+
+                    if roadmap_payload is not None:
+                        try:
+                            await update_roadmap(
+                                chat.room_id, {"roadmap": json.dumps(roadmap_payload)}
                             )
-                            await create_task(chat.room_id, task)
+                            applied_changes = True
+                        except Exception as roadmap_error:
+                            operation_issues.append(
+                                f"failed to update roadmap: {roadmap_error}"
+                            )
 
-                if result and "roadmap" in result and isinstance(result["roadmap"], dict):
-                    await update_roadmap(
-                        chat.room_id, {"roadmap": json.dumps(result["roadmap"])}
-                    )
+                    raw_reply = result.get("reply")
+                    ai_reply = str(raw_reply).strip() if isinstance(raw_reply, str) else ""
+                    ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
 
-                ai_reply = (
-                    result.get("reply")
-                    if result and isinstance(result, dict)
-                    else None
-                )
-                if not ai_reply:
-                    ai_reply = _strip_markdown_code_fences(response_text)
-                if not ai_reply:
-                    ai_reply = "I'm not sure how to answer that, could you rephrase?"
-                ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
+                    if operation_issues:
+                        issue_summary = _summarize_operation_issues(
+                            operation_issues, partial_changes=applied_changes
+                        )
+                        ai_reply = f"{ai_reply} {issue_summary}".strip() if ai_reply else issue_summary
+                    elif not ai_reply:
+                        ai_reply = (
+                            "Applied your requested board updates."
+                            if applied_changes
+                            else "I reviewed your request and no board changes were needed."
+                        )
+        except HTTPException as error:
+            logger.warning(
+                f"AI request failed with HTTPException: status={error.status_code}, detail={error.detail}"
+            )
+            ai_reply = _build_ai_operation_failure_message(
+                f"{error.status_code} {error.detail}"
+            )
         except Exception as error:
-            logger.warning(f"AI error: {error}")
-            ai_reply = (
-                "I'm having trouble answering that right now, could you please rephrase?"
+            logger.error(f"AI error: {error}", exc_info=True)
+            ai_reply = _build_ai_operation_failure_message(
+                "internal processing failure while generating or applying AI actions"
             )
 
         if not ai_reply:
