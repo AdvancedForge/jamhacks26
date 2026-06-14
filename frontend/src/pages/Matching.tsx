@@ -41,6 +41,20 @@ type MatchStatusResponse = {
   teammates?: TeammatePreview[];
 };
 
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  values.forEach((rawValue) => {
+    const value = (rawValue || "").trim();
+    if (!value) return;
+    const key = value.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(value);
+  });
+  return merged;
+}
+
 export default function MatchingPage({
   profile,
   authToken,
@@ -61,10 +75,28 @@ export default function MatchingPage({
   });
   const [loadingInviteId, setLoadingInviteId] = useState<string | null>(null);
   const [leaving, setLeaving] = useState(false);
+  const [leavingTeam, setLeavingTeam] = useState(false);
   const [joining, setJoining] = useState(false);
   const [starting, setStarting] = useState(false);
   const [inviteCodeInput, setInviteCodeInput] = useState("");
   const [inviteUsernameInput, setInviteUsernameInput] = useState("");
+
+  const teamMemberNames = uniqueNonEmpty([
+    profile.name,
+    ...(status.teammates || []).map((teammate) => teammate.username),
+  ]);
+  const teamSkills = uniqueNonEmpty([
+    ...(profile.skills || []),
+    ...(status.teammates || []).flatMap((teammate) => teammate.skills || []),
+  ]);
+  const teamInterests = uniqueNonEmpty([
+    profile.interest,
+    ...(status.teammates || []).map((teammate) => teammate.interest),
+  ]);
+  const teamVibes = uniqueNonEmpty([
+    profile.vibe,
+    ...(status.teammates || []).map((teammate) => teammate.vibe),
+  ]);
 
   const fetchStatus = useCallback(async () => {
     const response = await apiFetch<MatchStatusResponse>("/api/matchmaking/status", {
@@ -207,12 +239,28 @@ export default function MatchingPage({
         body: JSON.stringify({ invite_code: code }),
       });
       toast(response.in_room ? "Joined team room." : "Joined team in teammaking.", "success");
-      if (response.room_id) onTeamReady(response.room_id);
+      if (response.in_room && response.room_id) onTeamReady(response.room_id);
       await fetchStatus();
     } catch {
       toast("Could not join team with that code.", "error");
     } finally {
       setJoining(false);
+    }
+  };
+
+  const leaveTeam = async () => {
+    setLeavingTeam(true);
+    try {
+      await apiFetch("/api/matchmaking/team/leave", {
+        method: "POST",
+        headers: { "X-Auth-Token": authToken },
+      });
+      toast("You left your team and are solo in teammaking again.", "success");
+      await fetchStatus();
+    } catch {
+      toast("Could not leave team.", "error");
+    } finally {
+      setLeavingTeam(false);
     }
   };
 
@@ -227,11 +275,22 @@ export default function MatchingPage({
           <p className="text-[14px] text-[#a1a1aa] mt-4">
             Invite collaborators, respond to invites, and leave teammaking whenever your team is ready for a board.
           </p>
-          {status.invite_code && (
+          {(status.room_id || status.invite_code) && (
             <div className="mt-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3">
-              <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Team code</p>
-              <p className="text-[16px] text-white font-mono mt-1">{status.invite_code}</p>
-              <p className="text-[12px] text-[#71717a] mt-1">Share this with anyone using Join Team.</p>
+              {status.room_id ? (
+                <>
+                  <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Team room code</p>
+                  <p className="text-[16px] text-white font-mono mt-1">{status.room_id}</p>
+                  <p className="text-[12px] text-[#71717a] mt-1">Use this to join the normal room when your team is ready.</p>
+                </>
+              ) : null}
+              {status.invite_code ? (
+                <>
+                  <p className="text-[12px] uppercase tracking-wide text-[#52525b] mt-3">Team invite code</p>
+                  <p className="text-[16px] text-white font-mono mt-1">{status.invite_code}</p>
+                  <p className="text-[12px] text-[#71717a] mt-1">Share this with anyone using Join Team.</p>
+                </>
+              ) : null}
             </div>
           )}
           <div className="mt-4 flex flex-wrap gap-3">
@@ -254,9 +313,8 @@ export default function MatchingPage({
           </div>
         </section>
 
-
         <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-6 lg:grid-cols-2">
             <div>
               <p className="text-[13px] text-[#71717a] mb-3">Join Team</p>
               <div className="flex gap-3">
@@ -332,19 +390,29 @@ export default function MatchingPage({
           </section>
         )}
 
-        {(status.teammates || []).length > 0 && (
+        {status.team_id && teamMemberNames.length > 0 && (
           <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
-            <h3 className="text-[16px] text-white font-medium">Current Teammates</h3>
-            <div className="mt-4 grid gap-4">
-              {(status.teammates || []).map((teammate) => (
-                <article key={teammate.username} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
-                  <p className="text-white text-[15px]">{teammate.username}</p>
-                  <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {teammate.skills.join(", ") || "N/A"}</p>
-                  <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {teammate.interest || "N/A"}</p>
-                  <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {teammate.vibe || "N/A"}</p>
-                </article>
-              ))}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h3 className="text-[16px] text-white font-medium">Current Team</h3>
+              <button
+                onClick={() => void leaveTeam()}
+                disabled={leavingTeam}
+                className="bg-white/[0.05] border border-white/[0.08] text-white text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+              >
+                {leavingTeam ? "Leaving team..." : "Leave Team"}
+              </button>
             </div>
+            <article className="mt-4 border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
+              <p className="text-[13px] text-[#d4d4d8]">Members: {teamMemberNames.join(", ") || "N/A"}</p>
+              <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {teamSkills.join(", ") || "N/A"}</p>
+              <p className="text-[13px] text-[#d4d4d8] mt-1">Interests: {teamInterests.join(", ") || "N/A"}</p>
+              <p className="text-[13px] text-[#d4d4d8] mt-1">Vibes: {teamVibes.join(", ") || "N/A"}</p>
+              {status.room_id ? (
+                <p className="text-[13px] text-[#d4d4d8] mt-1">
+                  Room code: <span className="font-mono">{status.room_id}</span>
+                </p>
+              ) : null}
+            </article>
           </section>
         )}
 

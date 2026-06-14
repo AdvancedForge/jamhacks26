@@ -719,6 +719,39 @@ async def _load_team_member_profiles(
         )
     return summaries
 
+async def _ensure_team_room(team_doc: Dict[str, Any]) -> str:
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Teammaking requires database connectivity")
+    team_id = team_doc.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Team ID is missing")
+    room_id = str(team_doc.get("room_id") or "").strip().upper()
+    if not room_id:
+        room_id = _new_room_code()
+        while await db.rooms.find_one({"room_id": room_id}):
+            room_id = _new_room_code()
+    await db.teams.update_one(
+        {"team_id": team_id},
+        {
+            "$set": {
+                "room_id": room_id,
+                "updated_at": int(time.time() * 1000),
+            }
+        },
+    )
+    await db.rooms.update_one(
+        {"room_id": room_id},
+        {
+            "$setOnInsert": {
+                "room_id": room_id,
+                "created_at": "now",
+                "team_id": team_id,
+            }
+        },
+        upsert=True,
+    )
+    return room_id
+
 
 async def _mark_team_in_room(
     team_doc: Dict[str, Any], room_id: str, invite_code: str
@@ -1725,14 +1758,13 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
     member_names = _normalize_member_names(team.get("member_names", []))
     if username not in member_names:
         member_names.append(username)
-    team_room_id = team.get("room_id")
-    next_status = "active" if team_room_id else "forming"
+    team_room_id = await _ensure_team_room(team)
     await db.teams.update_one(
         {"team_id": team.get("team_id")},
         {
             "$set": {
                 "member_names": member_names,
-                "status": next_status,
+                "status": "forming",
                 "updated_at": int(time.time() * 1000),
             }
         },
@@ -1742,30 +1774,22 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
         {
             "$set": {
                 "team_id": team.get("team_id"),
-                "room_id": team_room_id,
+                "room_id": None,
                 "invite_code": invite_code,
                 "hackathon_id": team.get("hackathon_id") or user.get("hackathon_id"),
-                "looking_for_team": not bool(team_room_id),
+                "looking_for_team": True,
                 "updated_at": int(time.time() * 1000),
             }
         },
     )
     latest_user = await db.users.find_one({"username": username}) or user
-    await _upsert_match_participant_from_user(
-        latest_user, status="in_room" if team_room_id else "searching"
-    )
-    if team_room_id:
-        await _mark_team_in_room(
-            {**team, "member_names": member_names},
-            str(team_room_id),
-            invite_code,
-        )
+    await _upsert_match_participant_from_user(latest_user, status="searching")
     return {
         "ok": True,
         "room_id": team_room_id,
         "team_id": team.get("team_id"),
         "invite_code": invite_code,
-        "in_room": bool(team_room_id),
+        "in_room": False,
     }
 
 @app.post("/api/matchmaking/enroll")
@@ -1818,6 +1842,10 @@ async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
     normalized_hackathon_id = _normalize_hackathon_id(user.get("hackathon_id") or "default")
     team = await _load_team_for_user(user)
     invite_code = user.get("invite_code") or (team or {}).get("invite_code")
+    team_room_id: Optional[str] = None
+    if team:
+        existing_team_room_id = str(team.get("room_id") or "").strip().upper()
+        team_room_id = existing_team_room_id or await _ensure_team_room(team)
     if user.get("room_id"):
         return {
             "state": "in_room",
@@ -1914,6 +1942,7 @@ async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
         "looking_for_team": bool(user.get("looking_for_team", True)),
         "team_id": user.get("team_id"),
         "invite_code": invite_code,
+        "room_id": team_room_id,
         "teammates": await _load_team_member_profiles(team, username),
         "candidates": candidate_payload,
         "incoming_invites": incoming_payload,
@@ -2024,6 +2053,7 @@ async def respond_matchmaking_invite(
             detail="Cannot accept invite because one user is already in a room.",
         )
     inviter_team = await _ensure_team_for_user(inviter)
+    team_room_id = await _ensure_team_room(inviter_team)
     invitee_team_id = invitee.get("team_id")
     if invitee_team_id and invitee_team_id != inviter_team.get("team_id"):
         raise HTTPException(
@@ -2039,6 +2069,7 @@ async def respond_matchmaking_invite(
         {
             "$set": {
                 "member_names": member_names,
+                "room_id": team_room_id,
                 "status": "forming",
                 "updated_at": now,
             }
@@ -2051,6 +2082,7 @@ async def respond_matchmaking_invite(
                 "team_id": inviter_team.get("team_id"),
                 "invite_code": inviter_team.get("invite_code"),
                 "hackathon_id": inviter_team.get("hackathon_id"),
+                "room_id": None,
                 "looking_for_team": True,
                 "updated_at": now,
             }
@@ -2075,6 +2107,7 @@ async def respond_matchmaking_invite(
         "state": "accepted",
         "team_id": inviter_team.get("team_id"),
         "invite_code": inviter_team.get("invite_code"),
+        "room_id": team_room_id,
     }
 
 
@@ -2091,8 +2124,13 @@ async def leave_matchmaking(x_auth_token: Optional[str] = Header(None)):
             "invite_code": user.get("invite_code"),
         }
     team_doc = await _ensure_team_for_user(user)
-    room_id = str(team_doc.get("room_id") or "").strip() or _new_room_code()
+    room_id = await _ensure_team_room(team_doc)
     invite_code = str(team_doc.get("invite_code") or "").strip().upper() or _new_team_invite_code()
+    if not str(team_doc.get("invite_code") or "").strip():
+        await db.teams.update_one(
+            {"team_id": team_doc.get("team_id")},
+            {"$set": {"invite_code": invite_code, "updated_at": int(time.time() * 1000)}},
+        )
     await _mark_team_in_room(team_doc, room_id, invite_code)
     return {
         "ok": True,
@@ -2100,6 +2138,133 @@ async def leave_matchmaking(x_auth_token: Optional[str] = Header(None)):
         "team_id": team_doc.get("team_id"),
         "invite_code": invite_code,
     }
+
+@app.post("/api/matchmaking/team/leave")
+async def leave_matchmaking_team(x_auth_token: Optional[str] = Header(None)):
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Matchmaking requires database connectivity")
+    user = await _resolve_auth_user(x_auth_token)
+    username = str(user.get("username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid user")
+    if user.get("room_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="Leave the active room before leaving your team.",
+        )
+    team_doc = await _load_team_for_user(user)
+    now = int(time.time() * 1000)
+    if not team_doc:
+        await db.users.update_one(
+            {"username": username},
+            {
+                "$set": {
+                    "team_id": None,
+                    "invite_code": None,
+                    "room_id": None,
+                    "looking_for_team": True,
+                    "updated_at": now,
+                }
+            },
+        )
+        refreshed_user = await db.users.find_one({"username": username}) or user
+        await _upsert_match_participant_from_user(refreshed_user, status="searching")
+        return {"ok": True, "left_team": False}
+
+    team_id = team_doc.get("team_id")
+    hackathon_id = _normalize_hackathon_id(
+        user.get("hackathon_id") or team_doc.get("hackathon_id") or "default"
+    )
+    remaining_members = [
+        member_name
+        for member_name in _normalize_member_names(team_doc.get("member_names", []))
+        if member_name != username
+    ]
+
+    if len(remaining_members) >= 2:
+        await db.teams.update_one(
+            {"team_id": team_id},
+            {
+                "$set": {
+                    "member_names": remaining_members,
+                    "status": "forming",
+                    "updated_at": now,
+                }
+            },
+        )
+        await db.users.update_many(
+            {"username": {"$in": remaining_members}},
+            {
+                "$set": {
+                    "team_id": team_id,
+                    "room_id": None,
+                    "invite_code": team_doc.get("invite_code"),
+                    "looking_for_team": True,
+                    "updated_at": now,
+                }
+            },
+        )
+        await db.match_participants.update_many(
+            {"hackathon_id": hackathon_id, "name": {"$in": remaining_members}},
+            {
+                "$set": {
+                    "team_id": team_id,
+                    "room_id": None,
+                    "status": "searching",
+                    "updated_at": now,
+                }
+            },
+        )
+    else:
+        await db.teams.delete_one({"team_id": team_id})
+        if remaining_members:
+            await db.users.update_many(
+                {"username": {"$in": remaining_members}},
+                {
+                    "$set": {
+                        "team_id": None,
+                        "room_id": None,
+                        "invite_code": None,
+                        "looking_for_team": True,
+                        "updated_at": now,
+                    }
+                },
+            )
+            await db.match_participants.update_many(
+                {"hackathon_id": hackathon_id, "name": {"$in": remaining_members}},
+                {
+                    "$set": {
+                        "team_id": None,
+                        "room_id": None,
+                        "status": "searching",
+                        "updated_at": now,
+                    }
+                },
+            )
+
+    await db.users.update_one(
+        {"username": username},
+        {
+            "$set": {
+                "team_id": None,
+                "invite_code": None,
+                "room_id": None,
+                "looking_for_team": True,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.match_invites.update_many(
+        {
+            "hackathon_id": hackathon_id,
+            "status": "pending",
+            "$or": [{"inviter_name": username}, {"invitee_name": username}],
+        },
+        {"$set": {"status": "cancelled", "updated_at": now}},
+    )
+    refreshed_user = await db.users.find_one({"username": username}) or user
+    await _upsert_match_participant_from_user(refreshed_user, status="searching")
+    return {"ok": True, "left_team": True}
 
 
 @app.post("/api/profile/ideas")
