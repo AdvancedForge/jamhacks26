@@ -128,7 +128,11 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
       let parsedRoadmap = { vision: "Add vision here...", phases: {} };
       if (data.roadmap) {
         try {
-          parsedRoadmap = JSON.parse(data.roadmap);
+          const parsed = JSON.parse(data.roadmap);
+          parsedRoadmap = {
+            vision: parsed.vision || "Add vision here...",
+            phases: parsed.phases || {},
+          };
         } catch (error) {
           console.error("Failed to parse roadmap JSON, treating as raw text", error);
           parsedRoadmap = { vision: data.roadmap, phases: {} };
