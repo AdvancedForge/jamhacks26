@@ -1833,6 +1833,7 @@ async def send_chat_message(
                         ai_model_used = WHITEBOARD_VISION_MODEL
 
                 result = _extract_json_object(response_text)
+                repaired_response_text: Optional[str] = None
                 if not result:
                     repair_prompt = _build_board_action_repair_prompt(
                         user_message=chat.message,
@@ -1863,13 +1864,32 @@ async def send_chat_message(
                 operation_issues: List[str] = []
                 applied_changes = False
                 if not result:
-                    raw_preview = _strip_markdown_code_fences(response_text)
-                    if len(raw_preview) > 180:
-                        raw_preview = raw_preview[:177].rstrip() + "..."
-                    reason = "AI response was not valid JSON"
-                    if raw_preview:
-                        reason = f"{reason} (raw output preview: {raw_preview})"
-                    ai_reply = _build_ai_operation_failure_message(reason)
+                    primary_raw_output = (response_text or "").strip()
+                    if not primary_raw_output:
+                        primary_raw_output = "(empty model output)"
+
+                    debug_sections = [f"primary_output:\n{primary_raw_output}"]
+                    repair_raw_output = (repaired_response_text or "").strip()
+                    if repair_raw_output and repair_raw_output != primary_raw_output:
+                        debug_sections.append(f"repair_output:\n{repair_raw_output}")
+
+                    malformed_output_debug = "\n\n".join(debug_sections)
+                    if len(malformed_output_debug) > 8000:
+                        malformed_output_debug = (
+                            malformed_output_debug[:7997].rstrip() + "..."
+                        )
+
+                    logger.warning(
+                        "Board-action response was not valid JSON. malformed_output=%s",
+                        malformed_output_debug,
+                    )
+                    ai_reply = (
+                        _build_ai_operation_failure_message(
+                            "AI response was not valid JSON"
+                        )
+                        + "\nMalformed AI output:\n"
+                        + malformed_output_debug
+                    )
                 else:
                     raw_tasks = result.get("tasks", [])
                     if not isinstance(raw_tasks, list):
