@@ -1382,23 +1382,47 @@ def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
 
     import json
     import re
-
-    content = raw_text.replace("```json", "").replace("```", "").strip()
+    content = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE)
+    content = content.replace("```", "").strip()
     if not content:
         return None
-
-    if not content.startswith("{"):
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            content = match.group(0)
 
     try:
         parsed = json.loads(content)
         if isinstance(parsed, dict):
             return parsed
     except Exception:
+        pass
+
+    decoder = json.JSONDecoder()
+    parsed_candidates: List[Dict[str, Any]] = []
+    for index, character in enumerate(content):
+        if character != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(content[index:])
+        except Exception:
+            continue
+        if isinstance(candidate, dict):
+            parsed_candidates.append(candidate)
+
+    if not parsed_candidates:
         return None
-    return None
+
+    best_candidate = parsed_candidates[-1]
+    best_score = -1
+    for candidate in parsed_candidates:
+        score = 0
+        if "tasks" in candidate:
+            score += 2
+        if "reply" in candidate:
+            score += 2
+        if "roadmap" in candidate:
+            score += 2
+        if score >= best_score:
+            best_score = score
+            best_candidate = candidate
+    return best_candidate
 
 
 def _chunk_chat_reply(text: str, max_chars: int = 28) -> List[str]:
