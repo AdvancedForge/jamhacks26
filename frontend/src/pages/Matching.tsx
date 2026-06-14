@@ -218,7 +218,7 @@ export default function MatchingPage({
 
   return (
     <div className="w-full min-h-screen p-8 bg-[#08090a] text-white">
-      <div className="max-w-3xl mx-auto flex flex-col gap-6">
+      <div className="max-w-6xl mx-auto flex flex-col gap-6">
         <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
           <h2 className="text-[20px] font-semibold text-white">Teammaking</h2>
           <p className="text-[13px] text-[#71717a] mt-2">
@@ -254,41 +254,46 @@ export default function MatchingPage({
           </div>
         </section>
 
-        <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
-          <p className="text-[13px] text-[#71717a] mb-3">Join Team</p>
-          <div className="flex gap-3">
-            <input
-              value={inviteCodeInput}
-              onChange={(event) => setInviteCodeInput(event.target.value)}
-              placeholder="Enter team code"
-              className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
-            />
-            <button
-              onClick={() => void joinByInviteCode()}
-              disabled={joining}
-              className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
-            >
-              {joining ? "Joining..." : "Join Team"}
-            </button>
-          </div>
-        </section>
 
         <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
-          <p className="text-[13px] text-[#71717a] mb-3">Invite by Username</p>
-          <div className="flex gap-3">
-            <input
-              value={inviteUsernameInput}
-              onChange={(event) => setInviteUsernameInput(event.target.value)}
-              placeholder="Username to invite"
-              className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
-            />
-            <button
-              onClick={() => void inviteByUsername()}
-              disabled={loadingInviteId === inviteUsernameInput.trim()}
-              className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
-            >
-              Invite
-            </button>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div>
+              <p className="text-[13px] text-[#71717a] mb-3">Join Team</p>
+              <div className="flex gap-3">
+                <input
+                  value={inviteCodeInput}
+                  onChange={(event) => setInviteCodeInput(event.target.value)}
+                  placeholder="Enter team code"
+                  className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
+                />
+                <button
+                  onClick={() => void joinByInviteCode()}
+                  disabled={joining}
+                  className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
+                >
+                  {joining ? "Joining..." : "Join Team"}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[13px] text-[#71717a] mb-3">Invite by Username</p>
+              <div className="flex gap-3">
+                <input
+                  value={inviteUsernameInput}
+                  onChange={(event) => setInviteUsernameInput(event.target.value)}
+                  placeholder="Username to invite"
+                  className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
+                />
+                <button
+                  onClick={() => void inviteByUsername()}
+                  disabled={loadingInviteId === inviteUsernameInput.trim()}
+                  className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
+                >
+                  Invite
+                </button>
+              </div>
+            </div>
           </div>
           <p className="text-[12px] text-[#71717a] mt-2">
             Invite any teammate in teammatching by username, even if they are currently offline.
@@ -361,7 +366,7 @@ export default function MatchingPage({
           {(status.candidates || []).length === 0 ? (
             <p className="text-[14px] text-[#71717a] mt-3">No candidates available right now.</p>
           ) : (
-            <div className="mt-4 grid gap-4">
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {(status.candidates || []).map((candidate) => (
                 <article key={candidate.username} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
                   <p className="text-white text-[15px]">{candidate.username}</p>

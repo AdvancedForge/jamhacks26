@@ -19,6 +19,7 @@ const DASHBOARD_WALKTHROUGH_STORAGE_KEY = "hb_dashboard_walkthrough_seen";
 type SpotlightTarget = "nav" | "main" | "selector";
 type SpotlightStep = {
   target: SpotlightTarget;
+  mode?: "spotlight" | "card";
   selector?: string;
   advanceOnClickSelector?: string;
   autoOpenKanbanChat?: boolean;
@@ -34,6 +35,12 @@ const WHITEBOARD_AI_CHAT_TOGGLE_SELECTOR = '[data-tour="whiteboard-ai-chat-toggl
 const WHITEBOARD_AI_CHAT_PANEL_SELECTOR = '[data-tour="whiteboard-ai-chat-panel"]';
 
 const SPOTLIGHT_STEPS: SpotlightStep[] = [
+  {
+    target: "main",
+    mode: "card",
+    title: "Welcome to HackBuddy",
+    description: "Quick tour: we’ll show your core workflow so new teammates can get productive fast.",
+  },
   {
     target: "nav",
     title: "Top bar navigation",
@@ -106,6 +113,12 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
     padding: 10,
     title: "Settings section",
     description: "Manage onboarding profile, repo tracking, teammate posting, and API configuration from one settings hub.",
+  },
+  {
+    target: "main",
+    mode: "card",
+    title: "Thanks — you’re all set",
+    description: "Your workspace is ready. Jump into Roadmap, Kanban, Whiteboard, or Settings anytime from the top bar.",
   },
 ];
 
@@ -258,12 +271,11 @@ export default function App() {
     localStorage.removeItem(PAGE_STORAGE_KEY);
   };
 
-  const walkthroughStorageKey = `${DASHBOARD_WALKTHROUGH_STORAGE_KEY}:${authUser?.username || profile?.name || "guest"}`;
 
   const dismissDashboardWalkthrough = (persist = true) => {
     setShowDashboardWalkthrough(false);
     if (!persist) return;
-    localStorage.setItem(walkthroughStorageKey, "true");
+    localStorage.setItem(DASHBOARD_WALKTHROUGH_STORAGE_KEY, "true");
   };
 
   useEffect(() => {
@@ -302,9 +314,9 @@ export default function App() {
       setShowDashboardWalkthrough(false);
       return;
     }
-    const hasSeenWalkthrough = localStorage.getItem(walkthroughStorageKey) === "true";
+    const hasSeenWalkthrough = localStorage.getItem(DASHBOARD_WALKTHROUGH_STORAGE_KEY) === "true";
     setShowDashboardWalkthrough(!hasSeenWalkthrough);
-  }, [roomCode, walkthroughStorageKey]);
+  }, [roomCode]);
 
   useEffect(() => {
     if (!showDashboardWalkthrough) return;
@@ -359,7 +371,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!showDashboardWalkthrough || !activeWalkthroughStep) {
+    if (!showDashboardWalkthrough || !activeWalkthroughStep || activeWalkthroughStep.mode === "card") {
       setSpotlightRect(null);
       return;
     }
@@ -495,7 +507,41 @@ export default function App() {
         )}
         {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
       </main>
-      {showDashboardWalkthrough && spotlightRect && activeWalkthroughStep && (
+      {showDashboardWalkthrough && activeWalkthroughStep && activeWalkthroughStep.mode === "card" && (
+        <div className="fixed inset-0 z-[70] bg-black/80 pointer-events-auto flex items-center justify-center p-5">
+          <div className="w-full max-w-md rounded-xl border border-white/[0.12] bg-[#121317] px-5 py-4 shadow-2xl">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-[#71717a]">
+              Step {walkthroughStepIndex + 1}/{SPOTLIGHT_STEPS.length}
+            </p>
+            <h3 className="mt-2 text-[18px] font-semibold text-white">{activeWalkthroughStep.title}</h3>
+            <p className="mt-2 text-[13px] text-[#a1a1aa]">{activeWalkthroughStep.description}</p>
+            <div className="mt-4 flex items-center justify-between">
+              <button
+                onClick={() => dismissDashboardWalkthrough(false)}
+                className="text-[12px] text-[#a1a1aa] hover:text-white"
+              >
+                Remind me later
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={goToPreviousWalkthroughStep}
+                  disabled={walkthroughStepIndex === 0}
+                  className="text-[12px] border border-white/[0.1] rounded-md px-3 py-1.5 text-white disabled:opacity-40"
+                >
+                  Back
+                </button>
+                <button
+                  onClick={goToNextWalkthroughStep}
+                  className="text-[12px] rounded-md px-3 py-1.5 bg-white text-[#09090b] font-medium"
+                >
+                  {isLastWalkthroughStep ? "Finish" : "Next"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {showDashboardWalkthrough && spotlightRect && activeWalkthroughStep && activeWalkthroughStep.mode !== "card" && (
         <div className="fixed inset-0 z-[70] pointer-events-none overflow-hidden">
           <div className="absolute bg-black/80" style={{ top: 0, left: 0, right: 0, height: spotlightRect.top }} />
           <div
