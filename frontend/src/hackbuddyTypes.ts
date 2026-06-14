@@ -29,8 +29,6 @@ export type OnboardingProfile = {
   interest: string;
   vibe: string;
   discordUsername: string;
-  anonymousInMatching: boolean;
-  showDiscordWhenAnonymous: boolean;
 };
 
 export type AuthUser = {
@@ -41,8 +39,6 @@ export type AuthUser = {
   interest: string;
   vibe: string;
   discord_username: string;
-  anonymous_in_matching: boolean;
-  show_discord_when_anonymous: boolean;
   room_id?: string | null;
   team_id?: string | null;
   invite_code?: string | null;
@@ -59,4 +55,4 @@ export type Task = {
   deleted?: boolean;
 };
 
-export type AppPage = "Matching" | "Kanban" | "Whiteboard" | "Integrations" | "Roadmap";
+export type AppPage = "Kanban" | "Whiteboard" | "Integrations" | "Roadmap";

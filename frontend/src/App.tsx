@@ -9,9 +9,13 @@ import WhiteboardPage from "./pages/Whiteboard";
 import IntegrationsPage from "./pages/Integrations";
 import MatchingPage from "./pages/Matching";
 import { apiFetch } from "./hackbuddyApi";
-
 import RoadmapPage from "./pages/Roadmap";
+
 const PROFILE_STORAGE_KEY = "hb_profile";
+const PAGE_STORAGE_KEY = "hb_page";
+const ROOM_STORAGE_KEY = "hb_room_code";
+const DISPLAY_NAME_STORAGE_KEY = "hb_display_name";
+
 const profileFromAuthUser = (user: AuthUser): OnboardingProfile => ({
   hackathonId: (user.hackathon_id || "").trim(),
   name: (user.username || "").trim(),
@@ -20,8 +24,6 @@ const profileFromAuthUser = (user: AuthUser): OnboardingProfile => ({
   interest: (user.interest || "").trim(),
   vibe: (user.vibe || "").trim(),
   discordUsername: (user.discord_username || "").trim(),
-  anonymousInMatching: Boolean(user.anonymous_in_matching),
-  showDiscordWhenAnonymous: Boolean(user.show_discord_when_anonymous),
 });
 
 const readStoredProfile = (): OnboardingProfile | null => {
@@ -30,32 +32,34 @@ const readStoredProfile = (): OnboardingProfile | null => {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<OnboardingProfile>;
     if (!parsed || typeof parsed !== "object") return null;
-    const hackathonId = typeof parsed.hackathonId === "string" ? parsed.hackathonId.trim() : "";
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    const hackathonId = typeof parsed.hackathonId === "string" ? parsed.hackathonId.trim() : "";
     const interest = typeof parsed.interest === "string" ? parsed.interest.trim() : "";
     const vibe = typeof parsed.vibe === "string" ? parsed.vibe.trim() : "";
-    const lookingForTeam = Boolean(parsed.lookingForTeam);
     const discordUsername = typeof parsed.discordUsername === "string" ? parsed.discordUsername.trim() : "";
-    const anonymousInMatching = Boolean(parsed.anonymousInMatching);
-    const showDiscordWhenAnonymous = parsed.showDiscordWhenAnonymous !== false;
     const skills = Array.isArray(parsed.skills)
       ? parsed.skills.map((skill) => String(skill).trim()).filter(Boolean)
       : [];
-    if (!name || !interest || !hackathonId) return null;
+    if (!name) return null;
     return {
-      hackathonId,
       name,
-      lookingForTeam,
+      hackathonId,
+      lookingForTeam: Boolean(parsed.lookingForTeam),
+      skills,
       interest,
       vibe,
-      skills,
       discordUsername,
-      anonymousInMatching,
-      showDiscordWhenAnonymous,
     };
   } catch {
     return null;
   }
+};
+
+const normalizePage = (rawPage: string | null): AppPage => {
+  if (rawPage === "Kanban" || rawPage === "Whiteboard" || rawPage === "Integrations" || rawPage === "Roadmap") {
+    return rawPage;
+  }
+  return "Kanban";
 };
 
 export default function App() {
@@ -68,23 +72,65 @@ export default function App() {
       return null;
     }
   });
-  const [roomCode, setRoomCode] = useState(() => (authUser?.room_id || "").toString());
-  const [page, setPage] = useState<AppPage>(() => (localStorage.getItem("hb_page") as AppPage) || "Matching");
-  const [profile, setProfile] = useState<OnboardingProfile | null>(() => readStoredProfile());
-  const [polledAt, setPolledAt] = useState(Date.now());
+  const [profile, setProfile] = useState<OnboardingProfile | null>(() => {
+    const storedProfile = readStoredProfile();
+    if (storedProfile) return storedProfile;
+    return authUser ? profileFromAuthUser(authUser) : null;
+  });
+  const [roomCode, setRoomCode] = useState(() => {
+    const storedRoom = (localStorage.getItem(ROOM_STORAGE_KEY) || "").trim();
+    if (storedRoom) return storedRoom;
+    return (authUser?.room_id || "").toString().trim();
+  });
+  const [displayName, setDisplayName] = useState(() => {
+    const storedName = (localStorage.getItem(DISPLAY_NAME_STORAGE_KEY) || "").trim();
+    if (storedName) return storedName;
+    if (authUser?.username) return authUser.username;
+    return profile?.name || "You";
+  });
+  const [page, setPage] = useState<AppPage>(() => normalizePage(localStorage.getItem(PAGE_STORAGE_KEY)));
+  const [polledAt, setPolledAt] = useState(0);
   const { toasts, add: toast } = useToasts();
-  const handlePoll = useCallback(() => setPolledAt(Date.now()), []);
+
+  const handlePoll = useCallback(() => setPolledAt((current) => current + 1), []);
 
   const handleAuthenticated = (token: string, user: AuthUser, onboardingProfile: OnboardingProfile) => {
     setAuthToken(token);
     setAuthUser(user);
-    setRoomCode((user.room_id || "").toString());
-    setPage("Matching");
     setProfile(onboardingProfile);
+    setDisplayName(user.username || onboardingProfile.name || "You");
     localStorage.setItem("hb_auth_token", token);
     localStorage.setItem("hb_auth_user", JSON.stringify(user));
     localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(onboardingProfile));
-    localStorage.setItem("hb_page", "Matching");
+    localStorage.setItem(DISPLAY_NAME_STORAGE_KEY, user.username || onboardingProfile.name || "You");
+    const authRoom = (user.room_id || "").toString().trim();
+    if (authRoom) {
+      setRoomCode(authRoom);
+      setPage("Kanban");
+      localStorage.setItem(ROOM_STORAGE_KEY, authRoom);
+      localStorage.setItem(PAGE_STORAGE_KEY, "Kanban");
+    } else {
+      setRoomCode("");
+      localStorage.removeItem(ROOM_STORAGE_KEY);
+    }
+  };
+
+  const handleEnterRoom = (nextRoomCode: string, nextDisplayName: string) => {
+    const normalizedRoom = (nextRoomCode || "").trim().toUpperCase();
+    if (!normalizedRoom) return;
+    const resolvedName = nextDisplayName.trim() || profile?.name || authUser?.username || "You";
+    setRoomCode(normalizedRoom);
+    setDisplayName(resolvedName);
+    setPage("Kanban");
+    localStorage.setItem(ROOM_STORAGE_KEY, normalizedRoom);
+    localStorage.setItem(DISPLAY_NAME_STORAGE_KEY, resolvedName);
+    localStorage.setItem(PAGE_STORAGE_KEY, "Kanban");
+    setAuthUser((currentUser) => {
+      if (!currentUser) return currentUser;
+      const updatedUser = { ...currentUser, room_id: normalizedRoom };
+      localStorage.setItem("hb_auth_user", JSON.stringify(updatedUser));
+      return updatedUser;
+    });
   };
 
   const handleProfileUpdate = (nextProfile: OnboardingProfile) => {
@@ -94,28 +140,10 @@ export default function App() {
 
   const handleNav = (newPage: AppPage) => {
     setPage(newPage);
-    localStorage.setItem("hb_page", newPage);
+    localStorage.setItem(PAGE_STORAGE_KEY, newPage);
   };
-  const handleTeamReady = (nextRoomCode: string) => {
-    const normalizedRoomCode = (nextRoomCode || "").trim();
-    if (!normalizedRoomCode) return;
-    setRoomCode(normalizedRoomCode);
-    setPage("Kanban");
-    localStorage.setItem("hb_page", "Kanban");
-    setAuthUser((currentUser) => {
-      if (!currentUser) return currentUser;
-      const updatedUser = { ...currentUser, room_id: normalizedRoomCode };
-      localStorage.setItem("hb_auth_user", JSON.stringify(updatedUser));
-      return updatedUser;
-    });
-  };
-  useEffect(() => {
-    if (!profile && authUser) {
-      const recoveredProfile = profileFromAuthUser(authUser);
-      setProfile(recoveredProfile);
-      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(recoveredProfile));
-    }
-  }, [authUser, profile]);
+
+
   useEffect(() => {
     if (!authToken) return;
     const refresh = async () => {
@@ -123,31 +151,45 @@ export default function App() {
         const response = await apiFetch<{ user?: AuthUser }>("/api/auth/me", {
           headers: { "X-Auth-Token": authToken },
         });
-        if (response.user) {
-          setAuthUser(response.user);
-          setRoomCode((response.user.room_id || "").toString());
-          const refreshedProfile = profileFromAuthUser(response.user);
-          setProfile(refreshedProfile);
-          localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(refreshedProfile));
-          localStorage.setItem("hb_auth_user", JSON.stringify(response.user));
+        if (!response.user) return;
+        setAuthUser(response.user);
+        localStorage.setItem("hb_auth_user", JSON.stringify(response.user));
+        const refreshedProfile = profileFromAuthUser(response.user);
+        setProfile(refreshedProfile);
+        localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(refreshedProfile));
+        const authRoom = (response.user.room_id || "").toString().trim();
+        if (authRoom) {
+          setRoomCode(authRoom);
+          localStorage.setItem(ROOM_STORAGE_KEY, authRoom);
         }
       } catch {
-        // keep local session state as fallback
+        // keep local state as fallback
       }
     };
     void refresh();
     const interval = window.setInterval(() => {
       void refresh();
-    }, 4000);
+    }, 5000);
     return () => {
       window.clearInterval(interval);
     };
   }, [authToken]);
 
-  if (!authToken || !authUser || !profile) {
+  const isTeammakingView = !roomCode && Boolean(authToken) && Boolean(authUser) && Boolean(profile);
+
+  if (!roomCode && !isTeammakingView) {
     return (
       <>
-        <EntryScreen onAuthenticated={handleAuthenticated} />
+        <EntryScreen onAuthenticated={handleAuthenticated} onEnterRoom={handleEnterRoom} />
+        <ToastList toasts={toasts} />
+      </>
+    );
+  }
+
+  if (!roomCode && isTeammakingView && profile) {
+    return (
+      <>
+        <MatchingPage profile={profile} authToken={authToken} toast={toast} onTeamReady={(nextRoomCode) => handleEnterRoom(nextRoomCode, profile.name)} />
         <ToastList toasts={toasts} />
       </>
     );
@@ -172,19 +214,16 @@ export default function App() {
       <Topbar roomCode={roomCode} page={page} onNav={handleNav} polledAt={polledAt} />
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {(!roomCode || page === "Matching") && (
-          <MatchingPage profile={profile} authToken={authToken} toast={toast} onTeamReady={handleTeamReady} />
-        )}
-        {page === "Kanban" && roomCode && (
+        {page === "Kanban" && (
           <BoardPage
             roomCode={roomCode}
             toast={toast}
             onPoll={handlePoll}
-            currentUserName={profile?.name}
+            currentUserName={displayName}
           />
         )}
-        {page === "Whiteboard" && roomCode && <WhiteboardPage roomCode={roomCode} toast={toast} />}
-        {page === "Integrations" && roomCode && (
+        {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
+        {page === "Integrations" && (
           <IntegrationsPage
             roomCode={roomCode}
             toast={toast}
@@ -192,7 +231,7 @@ export default function App() {
             onProfileChange={handleProfileUpdate}
           />
         )}
-        {page === "Roadmap" && roomCode && <RoadmapPage roomCode={roomCode} toast={toast} />}
+        {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
       </main>
 
       <ToastList toasts={toasts} />

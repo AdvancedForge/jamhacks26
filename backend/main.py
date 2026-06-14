@@ -100,10 +100,8 @@ class DiscordTeam8sPayload(BaseModel):
     name: str
     skills: List[str] = Field(default_factory=list)
     interest: str
-    vibe: Optional[str] = None
+    vibe: str
     discord_username: Optional[str] = None
-    anonymous_in_matching: bool = False
-    show_discord_when_anonymous: bool = True
     discord_handle: Optional[str] = None
     looking_for: Optional[str] = None
     availability: Optional[str] = None
@@ -111,42 +109,31 @@ class DiscordTeam8sPayload(BaseModel):
 
 
 class MatchmakingEnrollPayload(BaseModel):
-    room_id: str
     hackathon_id: str = "default"
     name: str
     skills: List[str] = Field(default_factory=list)
     interest: str
     vibe: str
     discord_username: Optional[str] = None
-    anonymous_in_matching: bool = False
-    show_discord_when_anonymous: bool = True
 
 
-class MatchmakingStatusQuery(BaseModel):
-    room_id: str
-    hackathon_id: str = "default"
-    name: str
+class MatchmakingInvitePayload(BaseModel):
+    invitee_username: str
 
 
-class MatchmakingDecisionPayload(BaseModel):
-    room_id: str
-    hackathon_id: str = "default"
-    name: str
-    proposal_id: str
-    interested: bool
+class MatchmakingInviteDecisionPayload(BaseModel):
+    invite_id: str
+    accept: bool
 
 
 class SignupPayload(BaseModel):
     username: str
     password: str
     hackathon_id: str = "default"
-    looking_for_team: bool
     skills: List[str] = Field(default_factory=list)
     interest: str
-    vibe: Optional[str] = None
+    vibe: str
     discord_username: Optional[str] = None
-    anonymous_in_matching: bool = False
-    show_discord_when_anonymous: bool = True
 
 
 class LoginPayload(BaseModel):
@@ -156,6 +143,10 @@ class LoginPayload(BaseModel):
 
 class JoinTeamByCodePayload(BaseModel):
     invite_code: str
+
+
+class JoinRoomPayload(BaseModel):
+    room_id: str
 
 
 def _to_int(value: Any) -> int:
@@ -547,10 +538,6 @@ def _new_session_token() -> str:
     return f"sess_{uuid.uuid4().hex}"
 
 
-def _match_lobby_id(hackathon_id: str) -> str:
-    return f"lobby:{_normalize_hackathon_id(hackathon_id)}"
-
-
 async def _resolve_auth_user(token: Optional[str]) -> Dict[str, Any]:
     session_token = (token or "").strip()
     if not session_token:
@@ -575,159 +562,232 @@ async def _load_team_for_user(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return await db.teams.find_one({"team_id": team_id})
 
 
-def _participant_display_name(participant: Dict[str, Any]) -> str:
-    is_anonymous = bool(participant.get("anonymous_in_matching"))
-    if not is_anonymous:
-        return str(participant.get("name") or "").strip() or "Teammate"
-    discord_username = str(participant.get("discord_username") or "").strip()
-    if bool(participant.get("show_discord_when_anonymous")) and discord_username:
-        return discord_username
-    return "Anonymous teammate"
+def _new_room_code() -> str:
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
 
-def _tokenize_text(value: str) -> set[str]:
-    return {token for token in re.split(r"[^a-z0-9]+", value.lower()) if token}
+def _new_team_id() -> str:
+    return f"team_{uuid.uuid4().hex[:10]}"
 
 
-def _profile_match_score(left: Dict[str, Any], right: Dict[str, Any]) -> float:
-    left_skills = {skill.lower() for skill in left.get("skills", []) if isinstance(skill, str)}
-    right_skills = {skill.lower() for skill in right.get("skills", []) if isinstance(skill, str)}
-    shared_skills = len(left_skills.intersection(right_skills))
-    left_interest_tokens = _tokenize_text(str(left.get("interest", "")))
-    right_interest_tokens = _tokenize_text(str(right.get("interest", "")))
-    shared_interest_tokens = len(left_interest_tokens.intersection(right_interest_tokens))
-    same_vibe = 1 if str(left.get("vibe", "")).strip().lower() == str(right.get("vibe", "")).strip().lower() else 0
-    return (shared_skills * 3.0) + (shared_interest_tokens * 2.0) + (same_vibe * 1.5)
+def _new_team_invite_code() -> str:
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
-async def _get_match_participants(room_id: str, hackathon_id: str) -> List[Dict[str, Any]]:
-    scope_filter = {"room_id": room_id, "hackathon_id": hackathon_id}
-    if await is_db_connected():
-        participants = await db.match_participants.find(scope_filter).to_list(length=500)
-    else:
-        participants = []
-    if participants:
-        cleaned: List[Dict[str, Any]] = []
-        for participant in participants:
-            cleaned.append(
-                {
-                    "name": participant.get("name", ""),
-                    "skills": participant.get("skills", []),
-                    "interest": participant.get("interest", ""),
-                    "vibe": participant.get("vibe", ""),
-                    "discord_username": participant.get("discord_username", ""),
-                    "anonymous_in_matching": bool(participant.get("anonymous_in_matching")),
-                    "show_discord_when_anonymous": bool(participant.get("show_discord_when_anonymous", True)),
-                    "status": participant.get("status", "searching"),
-                    "current_proposal_id": participant.get("current_proposal_id"),
-                    "team_id": participant.get("team_id"),
-                }
-            )
-        return cleaned
-    members = await _get_room_members(room_id)
-    return [
-        {
-            "name": member.get("name", ""),
-            "skills": member.get("skills", []),
-            "interest": member.get("interest", ""),
-            "vibe": member.get("vibe", ""),
-            "discord_username": "",
-            "anonymous_in_matching": False,
-            "show_discord_when_anonymous": True,
-            "status": "searching",
-            "current_proposal_id": None,
-            "team_id": None,
-        }
-        for member in members
-    ]
+def _new_match_invite_id() -> str:
+    return f"invite_{uuid.uuid4().hex[:12]}"
 
 
-async def _record_pair_rejection(room_id: str, hackathon_id: str, name_a: str, name_b: str) -> int:
-    ordered = sorted([name_a.strip().lower(), name_b.strip().lower()])
-    pair_key = f"{ordered[0]}::{ordered[1]}"
-    if await is_db_connected():
-        result = await db.match_rejections.find_one_and_update(
-            {"room_id": room_id, "hackathon_id": hackathon_id, "pair_key": pair_key},
-            {"$inc": {"count": 1}, "$set": {"updated_at": int(time.time() * 1000)}},
-            upsert=True,
-            return_document=True,
-        )
-        if result and isinstance(result.get("count"), int):
-            return result["count"]
-        doc = await db.match_rejections.find_one(
-            {"room_id": room_id, "hackathon_id": hackathon_id, "pair_key": pair_key}
-        )
-        return int((doc or {}).get("count") or 1)
-    return 1
+def _normalize_member_names(raw_names: List[Any]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw_name in raw_names:
+        cleaned = " ".join(str(raw_name or "").split()).strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(cleaned)
+    return normalized
 
 
-async def _attempt_matchmaking(room_id: str, hackathon_id: str) -> None:
-    participants = await _get_match_participants(room_id, hackathon_id)
-    searchable = [
-        participant
-        for participant in participants
-        if participant.get("status") == "searching" and not participant.get("current_proposal_id")
-    ]
-    if len(searchable) < 2:
-        return
-    best_pair: Optional[tuple[Dict[str, Any], Dict[str, Any], float]] = None
-    if "chat_model" in globals() and searchable:
-        try:
-            ai_candidates = [
-                {
-                    "name": participant.get("name", ""),
-                    "skills": participant.get("skills", []),
-                    "interest": participant.get("interest", ""),
-                    "vibe": participant.get("vibe", ""),
-                }
-                for participant in searchable
-            ]
-            ai_prompt = (
-                "You are a teammate matching assistant. Pick the best pair based on NSIV alignment "
-                "(skills complement/overlap, interest similarity, vibe compatibility). "
-                "Return only JSON object: {\"pair\":[\"name1\",\"name2\"]}.\n"
-                f"Candidates: {json.dumps(ai_candidates)}"
-            )
-            ai_response = await chat_model.generate_content_async(ai_prompt)
-            parsed = _extract_json_object(getattr(ai_response, "text", ""))
-            ai_pair = parsed.get("pair") if isinstance(parsed, dict) else None
-            if isinstance(ai_pair, list) and len(ai_pair) == 2:
-                left_name = str(ai_pair[0] or "").strip()
-                right_name = str(ai_pair[1] or "").strip()
-                if left_name and right_name and left_name != right_name:
-                    left = next((p for p in searchable if p.get("name") == left_name), None)
-                    right = next((p for p in searchable if p.get("name") == right_name), None)
-                    if left and right:
-                        best_pair = (left, right, _profile_match_score(left, right))
-        except Exception as ai_error:
-            logger.warning(f"AI matchmaking fallback to heuristic: {ai_error}")
-    for idx, left in enumerate(searchable):
-        for right in searchable[idx + 1 :]:
-            score = _profile_match_score(left, right)
-            if not best_pair or score > best_pair[2]:
-                best_pair = (left, right, score)
-    if not best_pair:
-        return
-    left, right, _score = best_pair
-    proposal_id = f"proposal_{uuid.uuid4().hex[:12]}"
-    proposal_doc = {
-        "proposal_id": proposal_id,
-        "room_id": room_id,
-        "hackathon_id": hackathon_id,
-        "member_names": [left["name"], right["name"]],
-        "decisions": {
-            left["name"]: "pending",
-            right["name"]: "pending",
-        },
-        "status": "pending",
-        "created_at": int(time.time() * 1000),
+def _participant_summary(participant: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "username": str(participant.get("name") or "").strip(),
+        "skills": participant.get("skills", []),
+        "interest": str(participant.get("interest") or "").strip(),
+        "vibe": str(participant.get("vibe") or "").strip(),
+        "discord_username": str(participant.get("discord_username") or "").strip(),
+        "team_id": participant.get("team_id"),
     }
-    if await is_db_connected():
-        await db.match_proposals.insert_one(proposal_doc)
-        await db.match_participants.update_many(
-            {"room_id": room_id, "hackathon_id": hackathon_id, "name": {"$in": [left["name"], right["name"]]}},
-            {"$set": {"status": "pending", "current_proposal_id": proposal_id, "updated_at": int(time.time() * 1000)}},
+
+
+async def _upsert_match_participant_from_user(
+    user: Dict[str, Any], *, status: Optional[str] = None
+) -> None:
+    if not await is_db_connected():
+        return
+    username = str(user.get("username") or "").strip()
+    if not username:
+        return
+    next_status = status or ("in_room" if user.get("room_id") else "searching")
+    now = int(time.time() * 1000)
+    await db.match_participants.update_one(
+        {
+            "hackathon_id": _normalize_hackathon_id(user.get("hackathon_id") or "default"),
+            "name": username,
+        },
+        {
+            "$set": {
+                "hackathon_id": _normalize_hackathon_id(user.get("hackathon_id") or "default"),
+                "name": username,
+                "skills": _normalize_skill_list(user.get("skills", [])),
+                "interest": " ".join(str(user.get("interest") or "").split()).strip(),
+                "vibe": " ".join(str(user.get("vibe") or "").split()).strip(),
+                "discord_username": " ".join(
+                    str(user.get("discord_username") or "").split()
+                ).strip(),
+                "team_id": user.get("team_id"),
+                "room_id": user.get("room_id"),
+                "status": next_status,
+                "updated_at": now,
+            }
+        },
+        upsert=True,
+    )
+
+
+async def _ensure_team_for_user(user: Dict[str, Any]) -> Dict[str, Any]:
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Teammaking requires database connectivity")
+    username = str(user.get("username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid user")
+    existing_team = await _load_team_for_user(user)
+    if existing_team:
+        member_names = _normalize_member_names(existing_team.get("member_names", []))
+        if username not in member_names:
+            member_names.append(username)
+        invite_code = str(existing_team.get("invite_code") or "").strip().upper() or _new_team_invite_code()
+        updated_team = {
+            **existing_team,
+            "member_names": member_names,
+            "invite_code": invite_code,
+        }
+        await db.teams.update_one(
+            {"team_id": existing_team.get("team_id")},
+            {
+                "$set": {
+                    "member_names": member_names,
+                    "invite_code": invite_code,
+                    "updated_at": int(time.time() * 1000),
+                }
+            },
+            upsert=True,
         )
+        return updated_team
+
+    team_doc = {
+        "team_id": _new_team_id(),
+        "hackathon_id": _normalize_hackathon_id(user.get("hackathon_id") or "default"),
+        "member_names": [username],
+        "invite_code": _new_team_invite_code(),
+        "room_id": None,
+        "status": "forming",
+        "created_at": int(time.time() * 1000),
+        "updated_at": int(time.time() * 1000),
+    }
+    await db.teams.insert_one(team_doc)
+    await db.users.update_one(
+        {"username": username},
+        {
+            "$set": {
+                "team_id": team_doc["team_id"],
+                "invite_code": team_doc["invite_code"],
+                "updated_at": int(time.time() * 1000),
+            }
+        },
+    )
+    return team_doc
+
+
+async def _load_team_member_profiles(
+    team_doc: Optional[Dict[str, Any]], current_username: str
+) -> List[Dict[str, Any]]:
+    if not team_doc or not await is_db_connected():
+        return []
+    member_names = _normalize_member_names(team_doc.get("member_names", []))
+    if not member_names:
+        return []
+    users = await db.users.find({"username": {"$in": member_names}}).to_list(length=25)
+    by_name = {str(user.get("username") or "").strip(): user for user in users}
+    summaries: List[Dict[str, Any]] = []
+    for member_name in member_names:
+        if member_name == current_username:
+            continue
+        user_doc = by_name.get(member_name, {})
+        summaries.append(
+            {
+                "username": member_name,
+                "skills": user_doc.get("skills", []),
+                "interest": user_doc.get("interest", ""),
+                "vibe": user_doc.get("vibe", ""),
+                "discord_username": user_doc.get("discord_username", ""),
+            }
+        )
+    return summaries
+
+
+async def _mark_team_in_room(
+    team_doc: Dict[str, Any], room_id: str, invite_code: str
+) -> None:
+    if not await is_db_connected():
+        return
+    member_names = _normalize_member_names(team_doc.get("member_names", []))
+    if not member_names:
+        return
+    now = int(time.time() * 1000)
+    team_id = team_doc.get("team_id")
+    hackathon_id = _normalize_hackathon_id(team_doc.get("hackathon_id") or "default")
+    await db.teams.update_one(
+        {"team_id": team_id},
+        {
+            "$set": {
+                "room_id": room_id,
+                "status": "active",
+                "invite_code": invite_code,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.rooms.update_one(
+        {"room_id": room_id},
+        {
+            "$setOnInsert": {
+                "room_id": room_id,
+                "created_at": "now",
+                "team_id": team_id,
+            }
+        },
+        upsert=True,
+    )
+    await db.users.update_many(
+        {"username": {"$in": member_names}},
+        {
+            "$set": {
+                "team_id": team_id,
+                "room_id": room_id,
+                "invite_code": invite_code,
+                "looking_for_team": False,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.match_participants.update_many(
+        {"hackathon_id": hackathon_id, "name": {"$in": member_names}},
+        {
+            "$set": {
+                "team_id": team_id,
+                "room_id": room_id,
+                "status": "in_room",
+                "updated_at": now,
+            }
+        },
+        upsert=False,
+    )
+    await db.match_invites.update_many(
+        {
+            "hackathon_id": hackathon_id,
+            "status": "pending",
+            "$or": [
+                {"inviter_name": {"$in": member_names}},
+                {"invitee_name": {"$in": member_names}},
+            ],
+        },
+        {"$set": {"status": "cancelled", "updated_at": now}},
+    )
 
 
 def _new_mock_whiteboard_job_id() -> str:
@@ -1532,6 +1592,22 @@ async def get_profile(room_id: str, name: Optional[str] = None):
 async def get_profile_members(room_id: str):
     return {"members": await _get_room_members(room_id)}
 
+def _serialize_auth_user(
+    user: Dict[str, Any], team: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    return {
+        "username": user.get("username"),
+        "hackathon_id": user.get("hackathon_id") or "default",
+        "looking_for_team": bool(user.get("looking_for_team", True)),
+        "skills": user.get("skills", []),
+        "interest": user.get("interest", ""),
+        "vibe": user.get("vibe", ""),
+        "discord_username": user.get("discord_username", ""),
+        "room_id": user.get("room_id"),
+        "team_id": user.get("team_id"),
+        "invite_code": user.get("invite_code") or (team or {}).get("invite_code"),
+    }
+
 
 @app.post("/api/auth/signup")
 async def signup(payload: SignupPayload):
@@ -1545,20 +1621,18 @@ async def signup(payload: SignupPayload):
         raise HTTPException(status_code=409, detail="Username already exists")
     normalized_hackathon_id = _normalize_hackathon_id(payload.hackathon_id)
     normalized_vibe = " ".join((payload.vibe or "").split()).strip()
-    if payload.looking_for_team and not normalized_vibe:
-        raise HTTPException(status_code=400, detail="vibe is required when looking for a team")
+    if not normalized_vibe:
+        raise HTTPException(status_code=400, detail="vibe is required for teammaking signup")
     password_hash = _hash_password(payload.password)
     user_doc = {
         "username": username,
         "password_hash": password_hash,
         "hackathon_id": normalized_hackathon_id,
-        "looking_for_team": bool(payload.looking_for_team),
+        "looking_for_team": True,
         "skills": _normalize_skill_list(payload.skills),
         "interest": " ".join((payload.interest or "").split()).strip(),
         "vibe": normalized_vibe,
         "discord_username": " ".join((payload.discord_username or "").split()).strip(),
-        "anonymous_in_matching": bool(payload.anonymous_in_matching),
-        "show_discord_when_anonymous": bool(payload.show_discord_when_anonymous),
         "team_id": None,
         "room_id": None,
         "invite_code": None,
@@ -1574,42 +1648,12 @@ async def signup(payload: SignupPayload):
             "created_at": int(time.time() * 1000),
         }
     )
-    if user_doc["looking_for_team"]:
-        lobby_room_id = _match_lobby_id(normalized_hackathon_id)
-        await enroll_matchmaking(
-            MatchmakingEnrollPayload(
-                room_id=lobby_room_id,
-                hackathon_id=normalized_hackathon_id,
-                name=username,
-                skills=user_doc["skills"],
-                interest=user_doc["interest"],
-                vibe=user_doc["vibe"],
-                discord_username=user_doc["discord_username"],
-                anonymous_in_matching=user_doc["anonymous_in_matching"],
-                show_discord_when_anonymous=user_doc["show_discord_when_anonymous"],
-            )
-        )
+    await _upsert_match_participant_from_user(user_doc, status="searching")
     return {
         "ok": True,
         "token": session_token,
-        "user": {
-            "username": username,
-            "hackathon_id": normalized_hackathon_id,
-            "looking_for_team": user_doc["looking_for_team"],
-            "skills": user_doc["skills"],
-            "interest": user_doc["interest"],
-            "vibe": user_doc["vibe"],
-            "discord_username": user_doc["discord_username"],
-            "anonymous_in_matching": user_doc["anonymous_in_matching"],
-            "show_discord_when_anonymous": user_doc["show_discord_when_anonymous"],
-            "room_id": None,
-            "team_id": None,
-        },
-        "message": (
-            "Thanks! You'll be matched with a team soon."
-            if user_doc["looking_for_team"]
-            else "Account created. Join your team with an invite code when ready."
-        ),
+        "user": _serialize_auth_user(user_doc),
+        "message": "Account created for teammaking. Invite teammates from the teammaking screen.",
     }
 
 
@@ -1631,23 +1675,12 @@ async def login(payload: LoginPayload):
             "created_at": int(time.time() * 1000),
         }
     )
+    if not user.get("room_id") and bool(user.get("looking_for_team", True)):
+        await _upsert_match_participant_from_user(user, status="searching")
     return {
         "ok": True,
         "token": session_token,
-        "user": {
-            "username": user.get("username"),
-            "hackathon_id": user.get("hackathon_id") or "default",
-            "looking_for_team": bool(user.get("looking_for_team", True)),
-            "skills": user.get("skills", []),
-            "interest": user.get("interest", ""),
-            "vibe": user.get("vibe", ""),
-            "discord_username": user.get("discord_username", ""),
-            "anonymous_in_matching": bool(user.get("anonymous_in_matching")),
-            "show_discord_when_anonymous": bool(user.get("show_discord_when_anonymous", True)),
-            "room_id": user.get("room_id"),
-            "team_id": user.get("team_id"),
-            "invite_code": user.get("invite_code"),
-        },
+        "user": _serialize_auth_user(user),
     }
 
 
@@ -1655,22 +1688,11 @@ async def login(payload: LoginPayload):
 async def auth_me(x_auth_token: Optional[str] = Header(None)):
     user = await _resolve_auth_user(x_auth_token)
     team = await _load_team_for_user(user)
+    if not user.get("room_id") and bool(user.get("looking_for_team", True)):
+        await _upsert_match_participant_from_user(user, status="searching")
     return {
         "ok": True,
-        "user": {
-            "username": user.get("username"),
-            "hackathon_id": user.get("hackathon_id") or "default",
-            "looking_for_team": bool(user.get("looking_for_team", True)),
-            "skills": user.get("skills", []),
-            "interest": user.get("interest", ""),
-            "vibe": user.get("vibe", ""),
-            "discord_username": user.get("discord_username", ""),
-            "anonymous_in_matching": bool(user.get("anonymous_in_matching")),
-            "show_discord_when_anonymous": bool(user.get("show_discord_when_anonymous", True)),
-            "room_id": user.get("room_id"),
-            "team_id": user.get("team_id"),
-            "invite_code": user.get("invite_code") or (team or {}).get("invite_code"),
-        },
+        "user": _serialize_auth_user(user, team),
     }
 
 
@@ -1685,26 +1707,32 @@ async def get_invite_code(x_auth_token: Optional[str] = Header(None)):
 
 @app.post("/api/team/join-by-code")
 async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Optional[str] = Header(None)):
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Joining team requires database connectivity")
     user = await _resolve_auth_user(x_auth_token)
-    if user.get("team_id"):
-        return {"ok": True, "room_id": user.get("room_id"), "team_id": user.get("team_id")}
     invite_code = (payload.invite_code or "").strip().upper()
     if not invite_code:
         raise HTTPException(status_code=400, detail="invite_code is required")
-    if not await is_db_connected():
-        raise HTTPException(status_code=503, detail="Joining team requires database connectivity")
     team = await db.teams.find_one({"invite_code": invite_code})
     if not team:
         raise HTTPException(status_code=404, detail="Invite code not found")
-    member_names = list(team.get("member_names", []))
-    username = user.get("username")
+    username = str(user.get("username") or "").strip()
+    if user.get("team_id") and user.get("team_id") != team.get("team_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="You are already in another team. Leave that team first.",
+        )
+    member_names = _normalize_member_names(team.get("member_names", []))
     if username not in member_names:
         member_names.append(username)
+    team_room_id = team.get("room_id")
+    next_status = "active" if team_room_id else "forming"
     await db.teams.update_one(
         {"team_id": team.get("team_id")},
         {
             "$set": {
                 "member_names": member_names,
+                "status": next_status,
                 "updated_at": int(time.time() * 1000),
             }
         },
@@ -1714,307 +1742,344 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
         {
             "$set": {
                 "team_id": team.get("team_id"),
-                "room_id": team.get("room_id"),
+                "room_id": team_room_id,
                 "invite_code": invite_code,
                 "hackathon_id": team.get("hackathon_id") or user.get("hackathon_id"),
+                "looking_for_team": not bool(team_room_id),
                 "updated_at": int(time.time() * 1000),
             }
         },
     )
-    lobby_room_id = _match_lobby_id(team.get("hackathon_id") or user.get("hackathon_id") or "default")
-    await db.match_participants.update_one(
-        {
-            "room_id": lobby_room_id,
-            "hackathon_id": team.get("hackathon_id") or user.get("hackathon_id") or "default",
-            "name": username,
-        },
-        {
-            "$set": {
-                "status": "matched",
-                "team_id": team.get("team_id"),
-                "room_id": team.get("room_id"),
-                "current_proposal_id": None,
-                "updated_at": int(time.time() * 1000),
-            }
-        },
-        upsert=True,
+    latest_user = await db.users.find_one({"username": username}) or user
+    await _upsert_match_participant_from_user(
+        latest_user, status="in_room" if team_room_id else "searching"
     )
-    return {"ok": True, "room_id": team.get("room_id"), "team_id": team.get("team_id")}
-
-@app.post("/api/matchmaking/enroll")
-async def enroll_matchmaking(payload: MatchmakingEnrollPayload):
-    hackathon_id = _normalize_hackathon_id(payload.hackathon_id)
-    profile_doc = await _upsert_profile_record(
-        room_id=payload.room_id,
-        name=payload.name,
-        skills=payload.skills,
-        interest=payload.interest,
-        vibe=payload.vibe,
-    )
-    if await is_db_connected():
-        await db.match_participants.update_one(
-            {"room_id": payload.room_id, "hackathon_id": hackathon_id, "name": profile_doc["name"]},
-            {
-                "$set": {
-                    "room_id": payload.room_id,
-                    "hackathon_id": hackathon_id,
-                    "name": profile_doc["name"],
-                    "skills": profile_doc["skills"],
-                    "interest": profile_doc["interest"],
-                    "vibe": profile_doc["vibe"],
-                    "discord_username": " ".join((payload.discord_username or "").split()).strip(),
-                    "anonymous_in_matching": bool(payload.anonymous_in_matching),
-                    "show_discord_when_anonymous": bool(payload.show_discord_when_anonymous),
-                    "status": "searching",
-                    "team_id": None,
-                    "current_proposal_id": None,
-                    "updated_at": int(time.time() * 1000),
-                }
-            },
-            upsert=True,
+    if team_room_id:
+        await _mark_team_in_room(
+            {**team, "member_names": member_names},
+            str(team_room_id),
+            invite_code,
         )
-        await _attempt_matchmaking(payload.room_id, hackathon_id)
     return {
         "ok": True,
-        "message": "Thanks! You'll be matched with a team soon.",
+        "room_id": team_room_id,
+        "team_id": team.get("team_id"),
+        "invite_code": invite_code,
+        "in_room": bool(team_room_id),
+    }
+
+@app.post("/api/matchmaking/enroll")
+async def enroll_matchmaking(
+    payload: MatchmakingEnrollPayload, x_auth_token: Optional[str] = Header(None)
+):
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Matchmaking requires database connectivity")
+    user = await _resolve_auth_user(x_auth_token)
+    if user.get("room_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="You are already in a room and cannot join teammaking.",
+        )
+    username = str(user.get("username") or "").strip()
+    if payload.name and _normalize_username(payload.name) != username:
+        raise HTTPException(status_code=400, detail="Name must match your signed-in account")
+    hackathon_id = _normalize_hackathon_id(payload.hackathon_id)
+    updated_fields = {
+        "hackathon_id": hackathon_id,
+        "skills": _normalize_skill_list(payload.skills),
+        "interest": " ".join((payload.interest or "").split()).strip(),
+        "vibe": " ".join((payload.vibe or "").split()).strip(),
+        "discord_username": " ".join((payload.discord_username or "").split()).strip(),
+        "looking_for_team": True,
+        "updated_at": int(time.time() * 1000),
+    }
+    if not updated_fields["interest"] or not updated_fields["vibe"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Interest and vibe are required for teammaking.",
+        )
+    await db.users.update_one({"username": username}, {"$set": updated_fields})
+    latest_user = await db.users.find_one({"username": username}) or {**user, **updated_fields}
+    await _upsert_match_participant_from_user(latest_user, status="searching")
+    return {
+        "ok": True,
+        "message": "You are now visible in teammaking.",
         "hackathon_id": hackathon_id,
     }
 
-
 @app.get("/api/matchmaking/status")
-async def get_matchmaking_status(room_id: str, hackathon_id: str = "default", name: str = ""):
-    normalized_name = " ".join(name.split()).strip()
-    if not normalized_name:
-        raise HTTPException(status_code=400, detail="name is required")
-    normalized_hackathon_id = _normalize_hackathon_id(hackathon_id)
+async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
     if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Matchmaking requires database connectivity")
+    user = await _resolve_auth_user(x_auth_token)
+    username = str(user.get("username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid user")
+    normalized_hackathon_id = _normalize_hackathon_id(user.get("hackathon_id") or "default")
+    team = await _load_team_for_user(user)
+    invite_code = user.get("invite_code") or (team or {}).get("invite_code")
+    if user.get("room_id"):
         return {
-            "state": "waiting",
-            "message": "Thanks! You'll be matched with a team soon.",
-            "hackathon_id": normalized_hackathon_id,
+            "state": "in_room",
+            "room_id": user.get("room_id"),
+            "team_id": user.get("team_id"),
+            "invite_code": invite_code,
+            "teammates": await _load_team_member_profiles(team, username),
+            "candidates": [],
+            "incoming_invites": [],
+            "outgoing_invites": [],
         }
-    participant = await db.match_participants.find_one(
-        {"room_id": room_id, "hackathon_id": normalized_hackathon_id, "name": normalized_name}
+    if bool(user.get("looking_for_team", True)):
+        await _upsert_match_participant_from_user(user, status="searching")
+    exclude_team_id = user.get("team_id")
+    candidate_filter: Dict[str, Any] = {
+        "hackathon_id": normalized_hackathon_id,
+        "status": "searching",
+        "name": {"$ne": username},
+        "$or": [{"room_id": None}, {"room_id": ""}, {"room_id": {"$exists": False}}],
+    }
+    if exclude_team_id:
+        candidate_filter["team_id"] = {"$ne": exclude_team_id}
+    raw_candidates = await db.match_participants.find(candidate_filter).to_list(length=100)
+    incoming_invites = await db.match_invites.find(
+        {
+            "hackathon_id": normalized_hackathon_id,
+            "invitee_name": username,
+            "status": "pending",
+        }
+    ).to_list(length=50)
+    outgoing_invites = await db.match_invites.find(
+        {
+            "hackathon_id": normalized_hackathon_id,
+            "inviter_name": username,
+            "status": "pending",
+        }
+    ).to_list(length=50)
+    profile_lookup_names = _normalize_member_names(
+        [invite.get("inviter_name") for invite in incoming_invites]
+        + [invite.get("invitee_name") for invite in outgoing_invites]
     )
-    if not participant:
-        return {
-            "state": "waiting",
-            "message": "Thanks! You'll be matched with a team soon.",
-            "hackathon_id": normalized_hackathon_id,
-        }
-    if participant.get("status") == "solo":
-        return {
-            "state": "solo",
-            "message": "You are currently marked solo for this hackathon.",
-            "hackathon_id": normalized_hackathon_id,
-        }
-    if participant.get("status") == "matched" and participant.get("team_id"):
-        team_doc = await db.teams.find_one({"team_id": participant.get("team_id")})
-        teammates = await db.match_participants.find(
+    profile_docs = await db.users.find({"username": {"$in": profile_lookup_names}}).to_list(
+        length=120
+    )
+    profiles_by_name = {
+        str(profile.get("username") or "").strip(): profile for profile in profile_docs
+    }
+    incoming_payload = []
+    for invite in incoming_invites:
+        inviter_name = str(invite.get("inviter_name") or "").strip()
+        inviter_profile = profiles_by_name.get(inviter_name, {})
+        incoming_payload.append(
             {
-                "room_id": room_id,
-                "hackathon_id": normalized_hackathon_id,
-                "team_id": participant.get("team_id"),
-                "name": {"$ne": normalized_name},
-            }
-        ).to_list(length=10)
-        return {
-            "state": "matched",
-            "team_id": participant.get("team_id"),
-            "room_id": participant.get("room_id") or (team_doc or {}).get("room_id"),
-            "invite_code": (team_doc or {}).get("invite_code"),
-            "teammates": [
-                {
-                    "display_name": _participant_display_name(teammate),
-                    "is_anonymous": bool(teammate.get("anonymous_in_matching")),
-                    "discord_username": teammate.get("discord_username", ""),
-                    "skills": teammate.get("skills", []),
-                    "interest": teammate.get("interest", ""),
-                    "vibe": teammate.get("vibe", ""),
-                }
-                for teammate in teammates
-            ],
-        }
-    proposal_id = participant.get("current_proposal_id")
-    if proposal_id:
-        proposal = await db.match_proposals.find_one(
-            {
-                "room_id": room_id,
-                "hackathon_id": normalized_hackathon_id,
-                "proposal_id": proposal_id,
-                "status": "pending",
+                "invite_id": invite.get("invite_id"),
+                "from_username": inviter_name,
+                "team_id": invite.get("team_id"),
+                "skills": inviter_profile.get("skills", []),
+                "interest": inviter_profile.get("interest", ""),
+                "vibe": inviter_profile.get("vibe", ""),
+                "discord_username": inviter_profile.get("discord_username", ""),
             }
         )
-        if proposal:
-            teammate_names = [
-                member_name
-                for member_name in proposal.get("member_names", [])
-                if isinstance(member_name, str) and member_name != normalized_name
-            ]
-            teammate_docs = await db.match_participants.find(
-                {
-                    "room_id": room_id,
-                    "hackathon_id": normalized_hackathon_id,
-                    "name": {"$in": teammate_names},
-                }
-            ).to_list(length=10)
-            return {
-                "state": "proposal",
-                "proposal_id": proposal_id,
-                "teammates": [
-                    {
-                        "display_name": _participant_display_name(teammate),
-                        "is_anonymous": bool(teammate.get("anonymous_in_matching")),
-                        "discord_username": teammate.get("discord_username", ""),
-                        "skills": teammate.get("skills", []),
-                        "interest": teammate.get("interest", ""),
-                        "vibe": teammate.get("vibe", ""),
-                    }
-                    for teammate in teammate_docs
-                ],
-                "message": "Potential team found. Interested?",
+    outgoing_payload = []
+    for invite in outgoing_invites:
+        invitee_name = str(invite.get("invitee_name") or "").strip()
+        invitee_profile = profiles_by_name.get(invitee_name, {})
+        outgoing_payload.append(
+            {
+                "invite_id": invite.get("invite_id"),
+                "to_username": invitee_name,
+                "skills": invitee_profile.get("skills", []),
+                "interest": invitee_profile.get("interest", ""),
+                "vibe": invitee_profile.get("vibe", ""),
+                "discord_username": invitee_profile.get("discord_username", ""),
             }
-    await _attempt_matchmaking(room_id, normalized_hackathon_id)
+        )
     return {
-        "state": "waiting",
-        "message": "Thanks! You'll be matched with a team soon.",
-        "hackathon_id": normalized_hackathon_id,
+        "state": "teammaking",
+        "looking_for_team": bool(user.get("looking_for_team", True)),
+        "team_id": user.get("team_id"),
+        "invite_code": invite_code,
+        "teammates": await _load_team_member_profiles(team, username),
+        "candidates": [_participant_summary(candidate) for candidate in raw_candidates],
+        "incoming_invites": incoming_payload,
+        "outgoing_invites": outgoing_payload,
     }
 
 
-@app.post("/api/matchmaking/decision")
-async def submit_matchmaking_decision(payload: MatchmakingDecisionPayload):
-    normalized_name = " ".join(payload.name.split()).strip()
-    normalized_hackathon_id = _normalize_hackathon_id(payload.hackathon_id)
-    if not normalized_name:
-        raise HTTPException(status_code=400, detail="name is required")
+@app.post("/api/matchmaking/invite")
+async def invite_matchmaking_user(
+    payload: MatchmakingInvitePayload, x_auth_token: Optional[str] = Header(None)
+):
     if not await is_db_connected():
-        return {"ok": False, "error": "Matchmaking decisions require database connectivity."}
-    proposal = await db.match_proposals.find_one(
+        raise HTTPException(status_code=503, detail="Matchmaking requires database connectivity")
+    inviter = await _resolve_auth_user(x_auth_token)
+    inviter_name = str(inviter.get("username") or "").strip()
+    invitee_name = _normalize_username(payload.invitee_username)
+    if inviter.get("room_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="You are already in a room and cannot invite teammates.",
+        )
+    if inviter_name == invitee_name:
+        raise HTTPException(status_code=400, detail="You cannot invite yourself")
+    invitee = await db.users.find_one({"username": invitee_name})
+    if not invitee:
+        raise HTTPException(status_code=404, detail="Invitee not found")
+    if invitee.get("room_id"):
+        raise HTTPException(status_code=409, detail="Invitee is already in a room")
+    normalized_hackathon_id = _normalize_hackathon_id(inviter.get("hackathon_id") or "default")
+    if _normalize_hackathon_id(invitee.get("hackathon_id") or "default") != normalized_hackathon_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Invitee is in a different hackathon lobby.",
+        )
+    if inviter.get("team_id") and inviter.get("team_id") == invitee.get("team_id"):
+        raise HTTPException(status_code=400, detail="This user is already on your team.")
+    existing_pending = await db.match_invites.find_one(
         {
-            "room_id": payload.room_id,
             "hackathon_id": normalized_hackathon_id,
-            "proposal_id": payload.proposal_id,
+            "status": "pending",
+            "$or": [
+                {"inviter_name": inviter_name, "invitee_name": invitee_name},
+                {"inviter_name": invitee_name, "invitee_name": inviter_name},
+            ],
+        }
+    )
+    if existing_pending:
+        return {
+            "ok": True,
+            "invite_id": existing_pending.get("invite_id"),
+            "already_pending": True,
+        }
+    invite_doc = {
+        "invite_id": _new_match_invite_id(),
+        "hackathon_id": normalized_hackathon_id,
+        "inviter_name": inviter_name,
+        "invitee_name": invitee_name,
+        "team_id": inviter.get("team_id"),
+        "status": "pending",
+        "created_at": int(time.time() * 1000),
+        "updated_at": int(time.time() * 1000),
+    }
+    await db.match_invites.insert_one(invite_doc)
+    await _upsert_match_participant_from_user(inviter, status="searching")
+    await _upsert_match_participant_from_user(invitee, status="searching")
+    return {"ok": True, "invite_id": invite_doc["invite_id"], "already_pending": False}
+
+
+@app.post("/api/matchmaking/invite/respond")
+async def respond_matchmaking_invite(
+    payload: MatchmakingInviteDecisionPayload, x_auth_token: Optional[str] = Header(None)
+):
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Matchmaking requires database connectivity")
+    invitee = await _resolve_auth_user(x_auth_token)
+    invitee_name = str(invitee.get("username") or "").strip()
+    invite = await db.match_invites.find_one(
+        {
+            "invite_id": payload.invite_id,
+            "invitee_name": invitee_name,
             "status": "pending",
         }
     )
-    if not proposal:
-        return {"ok": False, "error": "Proposal not found or no longer active."}
-    decisions = dict(proposal.get("decisions", {}))
-    decisions[normalized_name] = "interested" if payload.interested else "not_interested"
-    await db.match_proposals.update_one(
-        {"_id": proposal["_id"]},
-        {"$set": {"decisions": decisions, "updated_at": int(time.time() * 1000)}},
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found or already handled")
+    if not payload.accept:
+        await db.match_invites.update_one(
+            {"_id": invite.get("_id")},
+            {"$set": {"status": "declined", "updated_at": int(time.time() * 1000)}},
+        )
+        return {"ok": True, "state": "declined"}
+    inviter_name = str(invite.get("inviter_name") or "").strip()
+    inviter = await db.users.find_one({"username": inviter_name})
+    if not inviter:
+        raise HTTPException(status_code=404, detail="Inviter no longer exists")
+    if inviter.get("room_id") or invitee.get("room_id"):
+        await db.match_invites.update_one(
+            {"_id": invite.get("_id")},
+            {"$set": {"status": "cancelled", "updated_at": int(time.time() * 1000)}},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot accept invite because one user is already in a room.",
+        )
+    inviter_team = await _ensure_team_for_user(inviter)
+    invitee_team_id = invitee.get("team_id")
+    if invitee_team_id and invitee_team_id != inviter_team.get("team_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="You are already in another team. Leave that team first.",
+        )
+    member_names = _normalize_member_names(
+        inviter_team.get("member_names", []) + [invitee_name]
     )
-    member_names = [member for member in proposal.get("member_names", []) if isinstance(member, str)]
-    if any(decisions.get(member) == "not_interested" for member in member_names):
-        for idx, member_name in enumerate(member_names):
-            for other_name in member_names[idx + 1 :]:
-                rejection_count = await _record_pair_rejection(
-                    payload.room_id, normalized_hackathon_id, member_name, other_name
-                )
-                if rejection_count >= 2:
-                    await db.match_participants.update_many(
-                        {
-                            "room_id": payload.room_id,
-                            "hackathon_id": normalized_hackathon_id,
-                            "name": {"$in": [member_name, other_name]},
-                        },
-                        {
-                            "$set": {
-                                "status": "solo",
-                                "current_proposal_id": None,
-                                "team_id": None,
-                                "updated_at": int(time.time() * 1000),
-                            }
-                        },
-                    )
-        await db.match_proposals.update_one(
-            {"_id": proposal["_id"]},
-            {"$set": {"status": "rejected", "updated_at": int(time.time() * 1000)}},
-        )
-        await db.match_participants.update_many(
-            {
-                "room_id": payload.room_id,
-                "hackathon_id": normalized_hackathon_id,
-                "name": {"$in": member_names},
-                "status": {"$ne": "solo"},
-            },
-            {
-                "$set": {
-                    "status": "searching",
-                    "current_proposal_id": None,
-                    "team_id": None,
-                    "updated_at": int(time.time() * 1000),
-                }
-            },
-        )
-        await _attempt_matchmaking(payload.room_id, normalized_hackathon_id)
-        return {"ok": True, "state": "searching"}
-    if all(decisions.get(member) == "interested" for member in member_names):
-        team_id = f"team_{uuid.uuid4().hex[:10]}"
-        room_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-        invite_code = room_id
-        await db.match_proposals.update_one(
-            {"_id": proposal["_id"]},
-            {
-                "$set": {
-                    "status": "accepted",
-                    "team_id": team_id,
-                    "room_id": room_id,
-                    "updated_at": int(time.time() * 1000),
-                }
-            },
-        )
-        await db.teams.update_one(
-            {"team_id": team_id},
-            {
-                "$set": {
-                    "team_id": team_id,
-                    "hackathon_id": normalized_hackathon_id,
-                    "member_names": member_names,
-                    "invite_code": invite_code,
-                    "room_id": room_id,
-                    "status": "formed",
-                    "updated_at": int(time.time() * 1000),
-                }
-            },
-            upsert=True,
-        )
-        await db.rooms.update_one(
-            {"room_id": room_id},
-            {"$setOnInsert": {"room_id": room_id, "created_at": "now", "team_id": team_id}},
-            upsert=True,
-        )
-        await db.users.update_many(
-            {"username": {"$in": member_names}},
-            {
-                "$set": {
-                    "team_id": team_id,
-                    "room_id": room_id,
-                    "invite_code": invite_code,
-                    "updated_at": int(time.time() * 1000),
-                }
-            },
-        )
-        await db.match_participants.update_many(
-            {
-                "room_id": payload.room_id,
-                "hackathon_id": normalized_hackathon_id,
-                "name": {"$in": member_names},
-            },
-            {
-                "$set": {
-                    "status": "matched",
-                    "team_id": team_id,
-                    "room_id": room_id,
-                    "current_proposal_id": None,
-                    "updated_at": int(time.time() * 1000),
-                }
-            },
-        )
-        return {"ok": True, "state": "matched", "team_id": team_id, "room_id": room_id, "invite_code": invite_code}
-    return {"ok": True, "state": "pending"}
+    now = int(time.time() * 1000)
+    await db.teams.update_one(
+        {"team_id": inviter_team.get("team_id")},
+        {
+            "$set": {
+                "member_names": member_names,
+                "status": "forming",
+                "updated_at": now,
+            }
+        },
+    )
+    await db.users.update_many(
+        {"username": {"$in": member_names}},
+        {
+            "$set": {
+                "team_id": inviter_team.get("team_id"),
+                "invite_code": inviter_team.get("invite_code"),
+                "hackathon_id": inviter_team.get("hackathon_id"),
+                "looking_for_team": True,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.match_invites.update_one(
+        {"_id": invite.get("_id")},
+        {
+            "$set": {
+                "status": "accepted",
+                "team_id": inviter_team.get("team_id"),
+                "updated_at": now,
+            }
+        },
+    )
+    refreshed_inviter = await db.users.find_one({"username": inviter_name}) or inviter
+    refreshed_invitee = await db.users.find_one({"username": invitee_name}) or invitee
+    await _upsert_match_participant_from_user(refreshed_inviter, status="searching")
+    await _upsert_match_participant_from_user(refreshed_invitee, status="searching")
+    return {
+        "ok": True,
+        "state": "accepted",
+        "team_id": inviter_team.get("team_id"),
+        "invite_code": inviter_team.get("invite_code"),
+    }
+
+
+@app.post("/api/matchmaking/leave")
+async def leave_matchmaking(x_auth_token: Optional[str] = Header(None)):
+    if not await is_db_connected():
+        raise HTTPException(status_code=503, detail="Matchmaking requires database connectivity")
+    user = await _resolve_auth_user(x_auth_token)
+    if user.get("room_id"):
+        return {
+            "ok": True,
+            "room_id": user.get("room_id"),
+            "team_id": user.get("team_id"),
+            "invite_code": user.get("invite_code"),
+        }
+    team_doc = await _ensure_team_for_user(user)
+    room_id = str(team_doc.get("room_id") or "").strip() or _new_room_code()
+    invite_code = str(team_doc.get("invite_code") or "").strip().upper() or _new_team_invite_code()
+    await _mark_team_in_room(team_doc, room_id, invite_code)
+    return {
+        "ok": True,
+        "room_id": room_id,
+        "team_id": team_doc.get("team_id"),
+        "invite_code": invite_code,
+    }
 
 
 @app.post("/api/profile/ideas")
@@ -2124,15 +2189,29 @@ async def post_discord_team8s(payload: DiscordTeam8sPayload):
 
 @app.post("/api/room/create")
 async def create_room():
-    # Generate a random 4-char alphanumeric string
-    room_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    room_id = _new_room_code()
 
     if await is_db_connected():
+        while await db.rooms.find_one({"room_id": room_id}):
+            room_id = _new_room_code()
         await db.rooms.insert_one({"room_id": room_id, "created_at": "now"})
         return {"room_id": room_id}
     else:
         # Fallback
         return {"room_id": room_id}
+
+
+@app.post("/api/room/join")
+async def join_room(payload: JoinRoomPayload):
+    room_id = (payload.room_id or "").strip().upper()
+    if not room_id:
+        raise HTTPException(status_code=400, detail="room_id is required")
+    if not await is_db_connected():
+        return {"ok": True, "room_id": room_id}
+    room = await db.rooms.find_one({"room_id": room_id})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    return {"ok": True, "room_id": room_id}
 
 
 @app.get("/api/board/{room_id}")

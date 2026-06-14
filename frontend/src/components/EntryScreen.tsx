@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { apiFetch } from "../hackbuddyApi";
 import type { AuthUser, OnboardingProfile } from "../hackbuddyTypes";
+
+type EntryMode = "landing" | "signin" | "signup" | "create-room" | "join-room";
 
 const parseSkills = (skillsInput: string) =>
   skillsInput
@@ -8,92 +10,52 @@ const parseSkills = (skillsInput: string) =>
     .map((skill) => skill.trim())
     .filter(Boolean);
 
+const profileFromUser = (user: AuthUser): OnboardingProfile => ({
+  hackathonId: (user.hackathon_id || "").trim(),
+  name: (user.username || "").trim(),
+  lookingForTeam: Boolean(user.looking_for_team),
+  skills: Array.isArray(user.skills) ? user.skills.map((skill) => String(skill).trim()).filter(Boolean) : [],
+  interest: (user.interest || "").trim(),
+  vibe: (user.vibe || "").trim(),
+  discordUsername: (user.discord_username || "").trim(),
+});
+
 export default function EntryScreen({
   onAuthenticated,
+  onEnterRoom,
 }: {
   onAuthenticated: (token: string, user: AuthUser, profile: OnboardingProfile) => void;
+  onEnterRoom: (roomCode: string, displayName: string) => void;
 }) {
-  const [mode, setMode] = useState<"signup" | "login">("signup");
-  const [signupStep, setSignupStep] = useState<1 | 2>(1);
+  const [mode, setMode] = useState<EntryMode>("landing");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [hackathonId, setHackathonId] = useState("");
-  const [lookingForTeam, setLookingForTeam] = useState<"" | "yes" | "no">("");
   const [skillsInput, setSkillsInput] = useState("");
   const [interest, setInterest] = useState("");
   const [vibe, setVibe] = useState("");
   const [discordUsername, setDiscordUsername] = useState("");
-  const [anonymousInMatching, setAnonymousInMatching] = useState(false);
-  const [showDiscordWhenAnonymous, setShowDiscordWhenAnonymous] = useState(true);
 
-  const buildProfile = (nextUser?: AuthUser): OnboardingProfile => ({
-    hackathonId: nextUser?.hackathon_id || hackathonId.trim() || "",
-    name: nextUser?.username || username.trim(),
-    lookingForTeam: nextUser?.looking_for_team ?? (lookingForTeam === "yes"),
-    skills: nextUser?.skills || parseSkills(skillsInput),
-    interest: nextUser?.interest || interest.trim(),
-    vibe: nextUser?.vibe || vibe.trim(),
-    discordUsername: nextUser?.discord_username || discordUsername.trim(),
-    anonymousInMatching: nextUser?.anonymous_in_matching ?? anonymousInMatching,
-    showDiscordWhenAnonymous: nextUser?.show_discord_when_anonymous ?? showDiscordWhenAnonymous,
-  });
+  const [displayName, setDisplayName] = useState("");
+  const [roomCodeInput, setRoomCodeInput] = useState("");
 
-  const validateSignup = () => {
-    const profile = buildProfile();
-    if (!profile.name) return "Username is required.";
-    if (!password.trim()) return "Password is required.";
-    if (!profile.hackathonId) return "Hackathon is required.";
-    if (lookingForTeam !== "yes" && lookingForTeam !== "no") return "Select whether you're looking for a team.";
-    if (profile.skills.length === 0) return "Add at least one skill.";
-    if (!profile.interest) return "Interest is required.";
-    if (profile.lookingForTeam && !profile.vibe) return "Vibe is required when looking for a team.";
+  const actionLabel = useMemo(() => {
+    if (mode === "signin") return "Sign in";
+    if (mode === "signup") return "Sign up for teammaking";
+    if (mode === "create-room") return "Create room";
+    if (mode === "join-room") return "Join room";
     return "";
-  };
+  }, [mode]);
 
-  const validateSignupStepOne = () => {
-    if (!username.trim()) return "Username is required.";
-    if (!password.trim()) return "Password is required.";
-    if (!hackathonId.trim()) return "Hackathon is required.";
-    return "";
-  };
-
-  const handleSignup = async () => {
-    const validationError = validateSignup();
-    if (validationError) {
-      setErr(validationError);
-      return;
-    }
-    setLoading(true);
+  const resetToLanding = () => {
+    setMode("landing");
     setErr("");
-    try {
-      const response = await apiFetch<{ token: string; user: AuthUser }>("/api/auth/signup", {
-        method: "POST",
-        body: JSON.stringify({
-          username: username.trim(),
-          password: password.trim(),
-          hackathon_id: hackathonId.trim(),
-          looking_for_team: lookingForTeam === "yes",
-          skills: parseSkills(skillsInput),
-          interest: interest.trim(),
-          vibe: vibe.trim() || undefined,
-          discord_username: discordUsername.trim() || undefined,
-          anonymous_in_matching: anonymousInMatching,
-          show_discord_when_anonymous: showDiscordWhenAnonymous,
-        }),
-      });
-      localStorage.setItem("hb_auth_token", response.token);
-      localStorage.setItem("hb_profile", JSON.stringify(buildProfile(response.user)));
-      onAuthenticated(response.token, response.user, buildProfile(response.user));
-    } catch {
-      setErr("Signup failed. Try a different username.");
-    } finally {
-      setLoading(false);
-    }
   };
 
-  const handleLogin = async () => {
+  const handleSignIn = async () => {
     if (!username.trim() || !password.trim()) {
       setErr("Enter username and password.");
       return;
@@ -108,23 +70,101 @@ export default function EntryScreen({
           password: password.trim(),
         }),
       });
+      const profile = profileFromUser(response.user);
       localStorage.setItem("hb_auth_token", response.token);
-      localStorage.setItem("hb_profile", JSON.stringify(buildProfile(response.user)));
-      onAuthenticated(response.token, response.user, buildProfile(response.user));
+      localStorage.setItem("hb_auth_user", JSON.stringify(response.user));
+      localStorage.setItem("hb_profile", JSON.stringify(profile));
+      onAuthenticated(response.token, response.user, profile);
+      if (response.user.room_id) {
+        onEnterRoom(String(response.user.room_id), response.user.username || "You");
+      }
     } catch {
-      setErr("Login failed. Check username/password.");
+      setErr("Sign in failed. Check username/password.");
     } finally {
       setLoading(false);
     }
   };
 
-  const actionLabel = mode === "signup" ? (signupStep === 1 ? "Continue" : "Create account") : "Login";
+  const handleSignUp = async () => {
+    const skills = parseSkills(skillsInput);
+    if (!username.trim() || !password.trim()) {
+      setErr("Username and password are required.");
+      return;
+    }
+    if (!hackathonId.trim()) {
+      setErr("Hackathon is required.");
+      return;
+    }
+    if (skills.length === 0 || !interest.trim() || !vibe.trim()) {
+      setErr("Skills, interest, and vibe are required for teammaking signup.");
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      const response = await apiFetch<{ token: string; user: AuthUser }>("/api/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          username: username.trim(),
+          password: password.trim(),
+          hackathon_id: hackathonId.trim(),
+          skills,
+          interest: interest.trim(),
+          vibe: vibe.trim(),
+          discord_username: discordUsername.trim() || undefined,
+        }),
+      });
+      const profile = profileFromUser(response.user);
+      localStorage.setItem("hb_auth_token", response.token);
+      localStorage.setItem("hb_auth_user", JSON.stringify(response.user));
+      localStorage.setItem("hb_profile", JSON.stringify(profile));
+      onAuthenticated(response.token, response.user, profile);
+    } catch {
+      setErr("Signup failed. Try a different username.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreateRoom = async () => {
+    setLoading(true);
+    setErr("");
+    try {
+      const response = await apiFetch<{ room_id: string }>("/api/room/create", { method: "POST" });
+      onEnterRoom(response.room_id, displayName.trim() || "You");
+    } catch {
+      setErr("Could not create a room right now.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleJoinRoom = async () => {
+    const normalizedRoomCode = roomCodeInput.trim().toUpperCase();
+    if (!normalizedRoomCode) {
+      setErr("Enter a room code.");
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      await apiFetch("/api/room/join", {
+        method: "POST",
+        body: JSON.stringify({ room_id: normalizedRoomCode }),
+      });
+      onEnterRoom(normalizedRoomCode, displayName.trim() || "You");
+    } catch {
+      setErr("Room not found. Check the code and try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#08090a] flex items-center justify-center px-4 relative overflow-hidden">
       <div className="absolute top-[-20%] left-[50%] translate-x-[-50%] w-[600px] h-[600px] bg-[#3b82f6]/[0.08] rounded-full blur-[120px] pointer-events-none" />
-      <div className="w-full max-w-[420px] relative z-10">
-        <div className="mb-10 text-center">
+      <div className="w-full max-w-[460px] relative z-10">
+        <div className="mb-8 text-center">
           <div className="inline-flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-xl bg-white/[0.05] border border-white/[0.08] flex items-center justify-center">
               <svg width="20" height="20" viewBox="0 0 28 28" fill="none">
@@ -138,183 +178,212 @@ export default function EntryScreen({
             </span>
           </div>
           <p className="text-[#71717a] text-[15px] leading-relaxed">
-            Sign in first. Team matchmaking happens before project rooms are created.
+            Sign in, or go directly into a room. Signup is for people actively building a team.
           </p>
         </div>
 
-        <div className="bg-[#0f1012]/80 backdrop-blur-xl border border-white/[0.06] rounded-2xl p-8 flex flex-col gap-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_50px_rgba(0,0,0,0.5)]">
-          <label className="text-[11px] uppercase tracking-wider text-[#52525b] font-medium">
-            {mode === "signup" ? `Create your account · Step ${signupStep}/2` : "Login"}
-          </label>
-
-          <input
-            value={username}
-            onChange={(e) => {
-              setUsername(e.target.value);
-              setErr("");
-            }}
-            placeholder="Username"
-            className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
-          />
-
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => {
-              setPassword(e.target.value);
-              setErr("");
-            }}
-            placeholder="Password"
-            className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
-          />
-
-          {mode === "signup" && signupStep === 1 && (
-            <input
-              value={hackathonId}
-              onChange={(e) => {
-                setHackathonId(e.target.value);
-                setErr("");
-              }}
-              placeholder="Hackathon (e.g. jamhacks26)"
-              className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
-            />
-          )}
-
-          {mode === "signup" && signupStep === 2 && (
+        <div className="bg-[#0f1012]/80 backdrop-blur-xl border border-white/[0.06] rounded-2xl p-7 flex flex-col gap-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_50px_rgba(0,0,0,0.5)]">
+          {mode === "landing" && (
             <>
-              <p className="text-[12px] text-[#71717a]">
-                Hackathon: <span className="text-[#d4d4d8]">{hackathonId.trim()}</span>
-              </p>
-              <select
-                value={lookingForTeam}
-                onChange={(e) => {
-                  const next = e.target.value as "" | "yes" | "no";
-                  setLookingForTeam(next);
-                  if (next === "no") setAnonymousInMatching(false);
+              <button
+                onClick={() => {
+                  setMode("signin");
                   setErr("");
                 }}
-                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white outline-none transition-all"
+                className="w-full bg-white text-[#09090b] font-semibold text-[14px] py-3 rounded-xl"
               >
-                <option value="" className="bg-[#0f1012]">
-                  Are you looking for a team?
-                </option>
-                <option value="yes" className="bg-[#0f1012]">
-                  Yes, match me
-                </option>
-                <option value="no" className="bg-[#0f1012]">
-                  No, I already have a team
-                </option>
-              </select>
+                Sign in
+              </button>
+              <button
+                onClick={() => {
+                  setMode("signup");
+                  setErr("");
+                }}
+                className="w-full bg-white/[0.05] border border-white/[0.08] text-white text-[14px] py-3 rounded-xl"
+              >
+                Sign up for teammaking
+              </button>
+              <div className="h-px bg-white/[0.08] my-1" />
+              <button
+                onClick={() => {
+                  setMode("create-room");
+                  setErr("");
+                }}
+                className="w-full bg-white/[0.05] border border-white/[0.08] text-white text-[14px] py-3 rounded-xl"
+              >
+                Create room now
+              </button>
+              <button
+                onClick={() => {
+                  setMode("join-room");
+                  setErr("");
+                }}
+                className="w-full bg-white/[0.05] border border-white/[0.08] text-white text-[14px] py-3 rounded-xl"
+              >
+                Join room by code
+              </button>
+            </>
+          )}
+
+          {mode === "signin" && (
+            <>
+              <label className="text-[11px] uppercase tracking-wider text-[#52525b] font-medium">Sign in</label>
+              <input
+                value={username}
+                onChange={(event) => {
+                  setUsername(event.target.value);
+                  setErr("");
+                }}
+                placeholder="Username"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+              />
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value);
+                  setErr("");
+                }}
+                placeholder="Password"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+              />
+            </>
+          )}
+
+          {mode === "signup" && (
+            <>
+              <label className="text-[11px] uppercase tracking-wider text-[#52525b] font-medium">Signup (teammaking only)</label>
+              <p className="text-[12px] text-[#a1a1aa] -mt-1">
+                Use this only if you want to find teammates and invite collaborators.
+              </p>
+              <input
+                value={username}
+                onChange={(event) => {
+                  setUsername(event.target.value);
+                  setErr("");
+                }}
+                placeholder="Username"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+              />
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value);
+                  setErr("");
+                }}
+                placeholder="Password"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+              />
+              <input
+                value={hackathonId}
+                onChange={(event) => {
+                  setHackathonId(event.target.value);
+                  setErr("");
+                }}
+                placeholder="Hackathon ID (e.g. jamhacks26)"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+              />
               <input
                 value={skillsInput}
-                onChange={(e) => {
-                  setSkillsInput(e.target.value);
+                onChange={(event) => {
+                  setSkillsInput(event.target.value);
                   setErr("");
                 }}
                 placeholder="Skills (comma separated)"
-                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
               />
               <input
                 value={interest}
-                onChange={(e) => {
-                  setInterest(e.target.value);
+                onChange={(event) => {
+                  setInterest(event.target.value);
                   setErr("");
                 }}
                 placeholder="Interest (what you want to build)"
-                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
               />
               <input
                 value={vibe}
-                onChange={(e) => {
-                  setVibe(e.target.value);
+                onChange={(event) => {
+                  setVibe(event.target.value);
                   setErr("");
                 }}
-                placeholder={
-                  lookingForTeam === "yes"
-                    ? "Vibe (required for team matching)"
-                    : "Vibe (optional)"
-                }
-                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+                placeholder="Vibe"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
               />
               <input
                 value={discordUsername}
-                onChange={(e) => {
-                  setDiscordUsername(e.target.value);
+                onChange={(event) => {
+                  setDiscordUsername(event.target.value);
                   setErr("");
                 }}
                 placeholder="Discord username (optional)"
-                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
               />
-              {lookingForTeam === "yes" && (
-                <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl px-4 py-3 flex flex-col gap-2">
-                  <label className="text-[13px] text-[#d4d4d8] flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={anonymousInMatching}
-                      onChange={(e) => setAnonymousInMatching(e.target.checked)}
-                    />
-                    Make my app username anonymous in team finding
-                  </label>
-                  <label className="text-[13px] text-[#a1a1aa] flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={showDiscordWhenAnonymous}
-                      onChange={(e) => setShowDiscordWhenAnonymous(e.target.checked)}
-                      disabled={!anonymousInMatching}
-                    />
-                    If anonymous, show Discord username when available
-                  </label>
-                </div>
+            </>
+          )}
+
+          {(mode === "create-room" || mode === "join-room") && (
+            <>
+              <label className="text-[11px] uppercase tracking-wider text-[#52525b] font-medium">
+                {mode === "create-room" ? "Create room" : "Join room"}
+              </label>
+              <input
+                value={displayName}
+                onChange={(event) => {
+                  setDisplayName(event.target.value);
+                  setErr("");
+                }}
+                placeholder="Display name (optional)"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+              />
+              {mode === "join-room" && (
+                <input
+                  value={roomCodeInput}
+                  onChange={(event) => {
+                    setRoomCodeInput(event.target.value);
+                    setErr("");
+                  }}
+                  placeholder="Room code"
+                  className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none"
+                />
               )}
             </>
           )}
 
-          <button
-            onClick={() => {
-              if (mode === "login") {
-                void handleLogin();
-                return;
-              }
-              if (signupStep === 1) {
-                const validationError = validateSignupStepOne();
-                if (validationError) {
-                  setErr(validationError);
-                  return;
-                }
-                setErr("");
-                setSignupStep(2);
-                return;
-              }
-              void handleSignup();
-            }}
-            disabled={loading}
-            className="w-full flex items-center justify-center gap-2.5 bg-white text-[#09090b] font-semibold text-[14px] py-3 rounded-xl transition-all hover:shadow-[0_0_30px_rgba(255,255,255,0.15)] disabled:opacity-50"
-          >
-            {loading ? <span className="w-4 h-4 border-2 border-[#09090b]/20 border-t-[#09090b] rounded-full animate-spin" /> : null}
-            {actionLabel}
-          </button>
-          {mode === "signup" && signupStep === 2 && (
+          {mode !== "landing" && (
             <button
               onClick={() => {
-                setSignupStep(1);
-                setErr("");
+                if (mode === "signin") {
+                  void handleSignIn();
+                  return;
+                }
+                if (mode === "signup") {
+                  void handleSignUp();
+                  return;
+                }
+                if (mode === "create-room") {
+                  void handleCreateRoom();
+                  return;
+                }
+                void handleJoinRoom();
               }}
-              className="text-[13px] text-[#a1a1aa] border border-white/[0.08] rounded-xl py-2.5 hover:bg-white/[0.03]"
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 bg-white text-[#09090b] font-semibold text-[14px] py-3 rounded-xl disabled:opacity-50"
             >
-              Back to account step
+              {loading ? <span className="w-4 h-4 border-2 border-[#09090b]/20 border-t-[#09090b] rounded-full animate-spin" /> : null}
+              {actionLabel}
             </button>
           )}
 
-          <button
-            onClick={() => {
-              setMode((currentMode) => (currentMode === "signup" ? "login" : "signup"));
-              setSignupStep(1);
-              setErr("");
-            }}
-            className="text-[13px] text-[#a1a1aa] border border-white/[0.08] rounded-xl py-2.5 hover:bg-white/[0.03]"
-          >
-            {mode === "signup" ? "Already have an account? Login" : "Need an account? Sign up"}
-          </button>
+          {mode !== "landing" && (
+            <button
+              onClick={resetToLanding}
+              className="text-[13px] text-[#a1a1aa] border border-white/[0.08] rounded-xl py-2.5 hover:bg-white/[0.03]"
+            >
+              Back
+            </button>
+          )}
 
           {err && <p className="text-[#ef4444] text-[13px]">{err}</p>}
         </div>

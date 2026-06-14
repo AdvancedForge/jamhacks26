@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppPage } from "../hackbuddyTypes";
 
-const NAV: AppPage[] = ["Matching", "Roadmap", "Kanban", "Whiteboard", "Integrations"];
+const NAV: AppPage[] = ["Roadmap", "Kanban", "Whiteboard", "Integrations"];
 
 export default function Topbar({
   roomCode,
@@ -15,11 +15,19 @@ export default function Topbar({
   polledAt: number;
 }) {
   const [secAgo, setSecAgo] = useState(0);
+  const lastPollAtRef = useRef(0);
 
   useEffect(() => {
-    const timer = setInterval(() => setSecAgo(Math.floor((Date.now() - polledAt) / 1000)), 1000);
-    return () => clearInterval(timer);
+    lastPollAtRef.current = Date.now();
   }, [polledAt]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!lastPollAtRef.current) return;
+      setSecAgo(Math.floor((Date.now() - lastPollAtRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   return (
     <header className="flex items-center gap-4 px-6 bg-[#0a0b0d]/80 backdrop-blur-xl border-b border-white/4 shrink-0 h-14">

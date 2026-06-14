@@ -3,21 +3,41 @@ import { apiFetch } from "../hackbuddyApi";
 import type { OnboardingProfile, ToastFn } from "../hackbuddyTypes";
 
 type TeammatePreview = {
-  display_name?: string;
-  is_anonymous?: boolean;
-  discord_username?: string;
+  username: string;
   skills: string[];
   interest: string;
   vibe: string;
+  discord_username?: string;
+};
+
+type IncomingInvite = {
+  invite_id: string;
+  from_username: string;
+  team_id?: string | null;
+  skills: string[];
+  interest: string;
+  vibe: string;
+  discord_username?: string;
+};
+
+type OutgoingInvite = {
+  invite_id: string;
+  to_username: string;
+  skills: string[];
+  interest: string;
+  vibe: string;
+  discord_username?: string;
 };
 
 type MatchStatusResponse = {
-  state?: "waiting" | "proposal" | "matched" | "solo" | "pending";
-  message?: string;
-  proposal_id?: string;
+  state?: "teammaking" | "in_room";
   team_id?: string;
   room_id?: string;
   invite_code?: string;
+  looking_for_team?: boolean;
+  incoming_invites?: IncomingInvite[];
+  outgoing_invites?: OutgoingInvite[];
+  candidates?: TeammatePreview[];
   teammates?: TeammatePreview[];
 };
 
@@ -32,69 +52,66 @@ export default function MatchingPage({
   toast: ToastFn;
   onTeamReady: (roomCode: string) => void;
 }) {
-  const [status, setStatus] = useState<MatchStatusResponse>({ state: "waiting" });
-  const [loadingDecision, setLoadingDecision] = useState(false);
+  const [status, setStatus] = useState<MatchStatusResponse>({
+    state: "teammaking",
+    candidates: [],
+    teammates: [],
+    incoming_invites: [],
+    outgoing_invites: [],
+  });
+  const [loadingInviteId, setLoadingInviteId] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [inviteCodeInput, setInviteCodeInput] = useState("");
 
-  const lobbyRoomId = `lobby:${(profile.hackathonId || "default").trim().toLowerCase()}`;
-
-  const enroll = useCallback(async () => {
-    if (!profile.lookingForTeam) return;
-    await apiFetch("/api/matchmaking/enroll", {
-      method: "POST",
-      body: JSON.stringify({
-        room_id: lobbyRoomId,
-        hackathon_id: profile.hackathonId || "default",
-        name: profile.name,
-        skills: profile.skills,
-        interest: profile.interest,
-        vibe: profile.vibe,
-        discord_username: profile.discordUsername || undefined,
-        anonymous_in_matching: profile.anonymousInMatching,
-        show_discord_when_anonymous: profile.showDiscordWhenAnonymous,
-      }),
-    });
-  }, [
-    lobbyRoomId,
-    profile.anonymousInMatching,
-    profile.discordUsername,
-    profile.hackathonId,
-    profile.interest,
-    profile.lookingForTeam,
-    profile.name,
-    profile.showDiscordWhenAnonymous,
-    profile.skills,
-    profile.vibe,
-  ]);
-
   const fetchStatus = useCallback(async () => {
-    if (!profile.lookingForTeam) {
-      setStatus({
-        state: "solo",
-        message: "You’re marked as already having a team. Use an invite code to enter your team room.",
-      });
-      return;
-    }
-    const response = await apiFetch<MatchStatusResponse>(
-      `/api/matchmaking/status?room_id=${encodeURIComponent(lobbyRoomId)}&hackathon_id=${encodeURIComponent(
-        profile.hackathonId || "default",
-      )}&name=${encodeURIComponent(profile.name)}`,
-    );
-    setStatus(response);
-    if (response.state === "matched" && response.room_id) {
+    const response = await apiFetch<MatchStatusResponse>("/api/matchmaking/status", {
+      headers: { "X-Auth-Token": authToken },
+    });
+    setStatus({
+      ...response,
+      candidates: response.candidates || [],
+      teammates: response.teammates || [],
+      incoming_invites: response.incoming_invites || [],
+      outgoing_invites: response.outgoing_invites || [],
+    });
+    if (response.state === "in_room" && response.room_id) {
       onTeamReady(response.room_id);
     }
-  }, [lobbyRoomId, onTeamReady, profile.hackathonId, profile.lookingForTeam, profile.name]);
+  }, [authToken, onTeamReady]);
+
+  const startTeammaking = async () => {
+    setStarting(true);
+    try {
+      await apiFetch("/api/matchmaking/enroll", {
+        method: "POST",
+        headers: { "X-Auth-Token": authToken },
+        body: JSON.stringify({
+          hackathon_id: profile.hackathonId || "default",
+          name: profile.name,
+          skills: profile.skills,
+          interest: profile.interest,
+          vibe: profile.vibe,
+          discord_username: profile.discordUsername || undefined,
+        }),
+      });
+      toast("You are now visible in teammaking.", "success");
+      await fetchStatus();
+    } catch {
+      toast("Could not start teammaking.", "error");
+    } finally {
+      setStarting(false);
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
     const boot = async () => {
       try {
-        await enroll();
-        if (!mounted) return;
         await fetchStatus();
       } catch {
-        if (mounted) toast("Couldn't enroll in matchmaking.", "warn");
+        if (mounted) toast("Couldn't load teammaking status.", "warn");
       }
     };
     void boot();
@@ -105,27 +122,61 @@ export default function MatchingPage({
       mounted = false;
       window.clearInterval(interval);
     };
-  }, [enroll, fetchStatus, toast]);
+  }, [fetchStatus, toast]);
 
-  const submitDecision = async (interested: boolean) => {
-    if (!status.proposal_id) return;
-    setLoadingDecision(true);
+  const inviteCandidate = async (candidateUsername: string) => {
+    setLoadingInviteId(candidateUsername);
     try {
-      await apiFetch("/api/matchmaking/decision", {
+      const response = await apiFetch<{ already_pending?: boolean }>("/api/matchmaking/invite", {
         method: "POST",
+        headers: { "X-Auth-Token": authToken },
         body: JSON.stringify({
-          room_id: lobbyRoomId,
-          hackathon_id: profile.hackathonId || "default",
-          name: profile.name,
-          proposal_id: status.proposal_id,
-          interested,
+          invitee_username: candidateUsername,
         }),
       });
+      toast(response.already_pending ? "Invite already pending." : "Invite sent.", "success");
       await fetchStatus();
     } catch {
-      toast("Failed to submit matchmaking decision.", "warn");
+      toast("Failed to send invite.", "warn");
     } finally {
-      setLoadingDecision(false);
+      setLoadingInviteId(null);
+    }
+  };
+
+  const respondInvite = async (inviteId: string, accept: boolean) => {
+    setLoadingInviteId(inviteId);
+    try {
+      await apiFetch("/api/matchmaking/invite/respond", {
+        method: "POST",
+        headers: { "X-Auth-Token": authToken },
+        body: JSON.stringify({
+          invite_id: inviteId,
+          accept,
+        }),
+      });
+      toast(accept ? "Invite accepted." : "Invite declined.", accept ? "success" : "warn");
+      await fetchStatus();
+    } catch {
+      toast("Could not update invite.", "error");
+    } finally {
+      setLoadingInviteId(null);
+    }
+  };
+
+  const leaveTeammaking = async () => {
+    setLeaving(true);
+    try {
+      const response = await apiFetch<{ room_id?: string }>("/api/matchmaking/leave", {
+        method: "POST",
+        headers: { "X-Auth-Token": authToken },
+      });
+      if (!response.room_id) throw new Error("Missing room");
+      toast("Left teammaking. Your board is ready.", "success");
+      onTeamReady(response.room_id);
+    } catch {
+      toast("Could not leave teammaking.", "error");
+    } finally {
+      setLeaving(false);
     }
   };
 
@@ -135,17 +186,20 @@ export default function MatchingPage({
       toast("Enter an invite code.", "warn");
       return;
     }
+    setJoining(true);
     try {
-      const response = await apiFetch<{ room_id?: string }>("/api/team/join-by-code", {
+      const response = await apiFetch<{ room_id?: string; in_room?: boolean }>("/api/team/join-by-code", {
         method: "POST",
         headers: { "X-Auth-Token": authToken },
         body: JSON.stringify({ invite_code: code }),
       });
-      toast("Joined team via invite code.", "success");
+      toast(response.in_room ? "Joined team room." : "Joined team in teammaking.", "success");
       if (response.room_id) onTeamReady(response.room_id);
       await fetchStatus();
     } catch {
       toast("Could not join team with that code.", "error");
+    } finally {
+      setJoining(false);
     }
   };
 
@@ -153,98 +207,147 @@ export default function MatchingPage({
     <div className="flex-1 overflow-y-auto p-8 bg-[#08090a]">
       <div className="max-w-3xl mx-auto flex flex-col gap-6">
         <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
-          <h2 className="text-[20px] font-semibold text-white">Team Matching</h2>
+          <h2 className="text-[20px] font-semibold text-white">Teammaking</h2>
           <p className="text-[13px] text-[#71717a] mt-2">
             Hackathon: <span className="text-[#d4d4d8]">{profile.hackathonId || "default"}</span>
           </p>
-          {status.state === "waiting" && (
-            <p className="text-[14px] text-[#a1a1aa] mt-4">
-              {status.message || "Thanks! You’ll be matched with a team soon."}
-            </p>
+          <p className="text-[14px] text-[#a1a1aa] mt-4">
+            Invite collaborators, respond to invites, and leave teammaking whenever your team is ready for a board.
+          </p>
+          {status.invite_code && (
+            <div className="mt-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3">
+              <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Team code</p>
+              <p className="text-[16px] text-white font-mono mt-1">{status.invite_code}</p>
+              <p className="text-[12px] text-[#71717a] mt-1">Share this with anyone using Join Team.</p>
+            </div>
           )}
-          {status.state === "proposal" && (
-            <p className="text-[14px] text-[#a1a1aa] mt-4">
-              {status.message || "A team request is waiting for your response."}
-            </p>
-          )}
-          {status.state === "pending" && (
-            <p className="text-[14px] text-[#a1a1aa] mt-4">
-              Decision sent. Waiting for your potential teammate(s) to respond.
-            </p>
-          )}
-          {status.state === "solo" && (
-            <p className="text-[14px] text-[#f59e0b] mt-4">
-              {status.message || "You are currently in solo mode for this hackathon."}
-            </p>
-          )}
-          {status.state === "matched" && (
-            <div className="mt-4">
-              <p className="text-[14px] text-[#22c55e]">Team formed successfully.</p>
-              <p className="text-[12px] text-[#71717a] mt-1">Team ID: {status.team_id}</p>
-              {status.invite_code ? <p className="text-[12px] text-[#71717a] mt-1">Invite code: {status.invite_code}</p> : null}
-              {status.room_id ? <p className="text-[12px] text-[#71717a] mt-1">Room: {status.room_id}</p> : null}
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              onClick={() => void leaveTeammaking()}
+              disabled={leaving}
+              className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl disabled:opacity-50"
+            >
+              {leaving ? "Leaving..." : "Leave Teammaking"}
+            </button>
+            {!status.looking_for_team && (
+              <button
+                onClick={() => void startTeammaking()}
+                disabled={starting}
+                className="bg-white/[0.05] border border-white/[0.08] text-white text-[14px] font-medium px-5 py-3 rounded-xl disabled:opacity-50"
+              >
+                {starting ? "Starting..." : "Start Teammaking"}
+              </button>
+            )}
+          </div>
+        </section>
+
+        <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+          <p className="text-[13px] text-[#71717a] mb-3">Join Team</p>
+          <div className="flex gap-3">
+            <input
+              value={inviteCodeInput}
+              onChange={(event) => setInviteCodeInput(event.target.value)}
+              placeholder="Enter team code"
+              className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
+            />
+            <button
+              onClick={() => void joinByInviteCode()}
+              disabled={joining}
+              className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
+            >
+              {joining ? "Joining..." : "Join Team"}
+            </button>
+          </div>
+        </section>
+
+        {(status.incoming_invites || []).length > 0 && (
+          <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+            <h3 className="text-[16px] text-white font-medium">Incoming Invites</h3>
+            <div className="mt-4 grid gap-4">
+              {(status.incoming_invites || []).map((invite) => (
+                <article key={invite.invite_id} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
+                  <p className="text-white text-[15px]">{invite.from_username}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {invite.skills.join(", ") || "N/A"}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {invite.interest || "N/A"}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {invite.vibe || "N/A"}</p>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={() => void respondInvite(invite.invite_id, true)}
+                      disabled={loadingInviteId === invite.invite_id}
+                      className="bg-white text-[#09090b] text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+                    >
+                      Accept
+                    </button>
+                    <button
+                      onClick={() => void respondInvite(invite.invite_id, false)}
+                      disabled={loadingInviteId === invite.invite_id}
+                      className="bg-white/[0.05] border border-white/[0.08] text-white text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+                    >
+                      Decline
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {(status.teammates || []).length > 0 && (
+          <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+            <h3 className="text-[16px] text-white font-medium">Current Teammates</h3>
+            <div className="mt-4 grid gap-4">
+              {(status.teammates || []).map((teammate) => (
+                <article key={teammate.username} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
+                  <p className="text-white text-[15px]">{teammate.username}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {teammate.skills.join(", ") || "N/A"}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {teammate.interest || "N/A"}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {teammate.vibe || "N/A"}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {(status.outgoing_invites || []).length > 0 && (
+          <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+            <h3 className="text-[16px] text-white font-medium">Pending Outgoing Invites</h3>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(status.outgoing_invites || []).map((invite) => (
+                <span key={invite.invite_id} className="text-[13px] text-[#d4d4d8] bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2">
+                  {invite.to_username}
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+          <h3 className="text-[16px] text-white font-medium">People Looking for Teammates</h3>
+          {(status.candidates || []).length === 0 ? (
+            <p className="text-[14px] text-[#71717a] mt-3">No candidates available right now.</p>
+          ) : (
+            <div className="mt-4 grid gap-4">
+              {(status.candidates || []).map((candidate) => (
+                <article key={candidate.username} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
+                  <p className="text-white text-[15px]">{candidate.username}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {candidate.skills.join(", ") || "N/A"}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {candidate.interest || "N/A"}</p>
+                  <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {candidate.vibe || "N/A"}</p>
+                  {candidate.discord_username ? (
+                    <p className="text-[13px] text-[#d4d4d8] mt-1">Discord: {candidate.discord_username}</p>
+                  ) : null}
+                  <button
+                    onClick={() => void inviteCandidate(candidate.username)}
+                    disabled={loadingInviteId === candidate.username}
+                    className="mt-3 bg-white text-[#09090b] text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+                  >
+                    Invite to Collaborate
+                  </button>
+                </article>
+              ))}
             </div>
           )}
         </section>
-
-        {status.state !== "matched" && (
-          <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
-            <p className="text-[13px] text-[#71717a] mb-3">Have a team invite code?</p>
-            <div className="flex gap-3">
-              <input
-                value={inviteCodeInput}
-                onChange={(event) => setInviteCodeInput(event.target.value)}
-                placeholder="Enter invite code"
-                className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
-              />
-              <button
-                onClick={() => void joinByInviteCode()}
-                className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all"
-              >
-                Join
-              </button>
-            </div>
-          </section>
-        )}
-
-        {(status.state === "proposal" || status.state === "matched") && (status.teammates || []).length > 0 && (
-          <section className="grid gap-4">
-            {(status.teammates || []).map((teammate, index) => (
-              <article key={`${index}-${teammate.vibe}`} className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-5">
-                <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Teammate {index + 1}</p>
-                <p className="text-[15px] text-white mt-2">{teammate.display_name || "Teammate"}</p>
-                <p className="text-[14px] text-[#d4d4d8] mt-2">
-                  <span className="text-[#71717a]">Skills:</span> {teammate.skills?.join(", ") || "N/A"}
-                </p>
-                <p className="text-[14px] text-[#d4d4d8] mt-1">
-                  <span className="text-[#71717a]">Interest:</span> {teammate.interest || "N/A"}
-                </p>
-                <p className="text-[14px] text-[#d4d4d8] mt-1">
-                  <span className="text-[#71717a]">Vibe:</span> {teammate.vibe || "N/A"}
-                </p>
-              </article>
-            ))}
-          </section>
-        )}
-
-        {status.state === "proposal" && (
-          <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6 flex gap-3">
-            <button
-              onClick={() => void submitDecision(true)}
-              disabled={loadingDecision}
-              className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
-            >
-              I’m interested
-            </button>
-            <button
-              onClick={() => void submitDecision(false)}
-              disabled={loadingDecision}
-              className="bg-white/[0.05] border border-white/[0.08] text-white text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
-            >
-              Not interested
-            </button>
-          </section>
-        )}
       </div>
     </div>
   );

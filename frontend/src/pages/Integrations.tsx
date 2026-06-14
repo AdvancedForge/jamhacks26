@@ -65,22 +65,16 @@ export default function IntegrationsPage({
   const buildProfile = (): OnboardingProfile => ({
     hackathonId: profile?.hackathonId || "",
     name: name.trim(),
-    lookingForTeam: profile?.lookingForTeam ?? true,
+    lookingForTeam: profile?.lookingForTeam ?? false,
     skills: parseSkills(skillsInput),
     interest: interest.trim(),
     vibe: vibe.trim(),
     discordUsername: profile?.discordUsername || "",
-    anonymousInMatching: profile?.anonymousInMatching ?? false,
-    showDiscordWhenAnonymous: profile?.showDiscordWhenAnonymous ?? true,
   });
 
   const ensureValidProfile = (nextProfile: OnboardingProfile) => {
-    if (!nextProfile.name || !nextProfile.interest || !nextProfile.hackathonId || nextProfile.skills.length === 0) {
-      toast("Fill Name, Hackathon, Skills, and Interest first.", "warn");
-      return false;
-    }
-    if (nextProfile.lookingForTeam && !nextProfile.vibe) {
-      toast("Vibe is required while you are seeking a team.", "warn");
+    if (!nextProfile.name || !nextProfile.interest || !nextProfile.vibe || nextProfile.skills.length === 0) {
+      toast("Fill Name, Skills, Interest, and Vibe first.", "warn");
       return false;
     }
     return true;
@@ -100,22 +94,6 @@ export default function IntegrationsPage({
           vibe: nextProfile.vibe,
         }),
       });
-      if (nextProfile.lookingForTeam) {
-        await apiFetch("/api/matchmaking/enroll", {
-          method: "POST",
-          body: JSON.stringify({
-            room_id: roomCode,
-            hackathon_id: nextProfile.hackathonId || "default",
-            name: nextProfile.name,
-            skills: nextProfile.skills,
-            interest: nextProfile.interest,
-            vibe: nextProfile.vibe,
-            discord_username: nextProfile.discordUsername || undefined,
-            anonymous_in_matching: nextProfile.anonymousInMatching,
-            show_discord_when_anonymous: nextProfile.showDiscordWhenAnonymous,
-          }),
-        });
-      }
       localStorage.setItem("hb_profile", JSON.stringify(nextProfile));
       onProfileChange(nextProfile);
       toast("Onboarding profile saved.", "success");
@@ -200,9 +178,16 @@ export default function IntegrationsPage({
 
   useEffect(() => {
     if (!connected) return;
-    fetchCommits();
-    const timer = setInterval(fetchCommits, 30000);
-    return () => clearInterval(timer);
+    const initialTimer = window.setTimeout(() => {
+      void fetchCommits();
+    }, 0);
+    const timer = window.setInterval(() => {
+      void fetchCommits();
+    }, 30000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(timer);
+    };
   }, [connected, fetchCommits]);
 
   const handleConnect = async () => {
