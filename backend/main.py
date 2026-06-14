@@ -2126,6 +2126,25 @@ async def invite_matchmaking_user(
         )
     if inviter_team_id and inviter_team_id == invitee_team_id:
         raise HTTPException(status_code=400, detail="This user is already on your team.")
+    reciprocal_invite = await db.match_invites.find_one(
+        {
+            "hackathon_id": normalized_hackathon_id,
+            "status": "pending",
+            "inviter_name": invitee_name,
+            "invitee_name": inviter_name,
+        }
+    )
+    if reciprocal_invite and reciprocal_invite.get("invite_id"):
+        accepted = await respond_matchmaking_invite(
+            MatchmakingInviteDecisionPayload(
+                invite_id=str(reciprocal_invite.get("invite_id")),
+                accept=True,
+            ),
+            x_auth_token=x_auth_token,
+        )
+        if isinstance(accepted, dict):
+            return {**accepted, "already_pending": False, "auto_accepted": True}
+        return {"ok": True, "state": "accepted", "already_pending": False, "auto_accepted": True}
     if target_team_id:
         existing_pending = await db.match_invites.find_one(
             {

@@ -175,7 +175,7 @@ export default function MatchingPage({
     const requestKey = inviteRequestKey(normalizedCandidateUsername, normalizedTargetTeamId);
     setLoadingInviteId(requestKey);
     try {
-      const response = await apiFetch<{ already_pending?: boolean }>("/api/matchmaking/invite", {
+      const response = await apiFetch<{ already_pending?: boolean; auto_accepted?: boolean; state?: string }>("/api/matchmaking/invite", {
         method: "POST",
         headers: { "X-Auth-Token": authToken },
         body: JSON.stringify({
@@ -183,7 +183,11 @@ export default function MatchingPage({
           invitee_team_id: normalizedTargetTeamId,
         }),
       });
-      toast(response.already_pending ? "Invite already pending." : "Invite sent.", "success");
+      if (response.auto_accepted || response.state === "accepted") {
+        toast("Mutual invite detected — team request accepted.", "success");
+      } else {
+        toast(response.already_pending ? "Invite already pending." : "Invite sent.", "success");
+      }
       await fetchStatus();
       return true;
     } catch {
@@ -361,14 +365,14 @@ export default function MatchingPage({
         {(status.incoming_invites || []).length > 0 && (
           <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
             <h3 className="text-[16px] text-white font-medium">Incoming Invites</h3>
-            <div className="mt-4 grid gap-4">
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               {(status.incoming_invites || []).map((invite) => (
-                <article key={invite.invite_id} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
+                <article key={invite.invite_id} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-3">
                   <p className="text-white text-[15px]">{invite.from_username}</p>
                   <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {invite.skills.join(", ") || "N/A"}</p>
                   <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {invite.interest || "N/A"}</p>
                   <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {invite.vibe || "N/A"}</p>
-                  <div className="mt-3 flex gap-2">
+                  <div className="mt-2 flex gap-2 flex-wrap">
                     <button
                       onClick={() => void respondInvite(invite.invite_id, true)}
                       disabled={loadingInviteId === invite.invite_id}
