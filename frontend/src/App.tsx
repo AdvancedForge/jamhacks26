@@ -38,7 +38,7 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
   {
     target: "main",
     mode: "card",
-    title: "Welcome to HackBuddy",
+    title: "Welcome to HackPilot",
     description: "Quick tour: we’ll show your core workflow so new teammates can get productive fast.",
   },
   {
@@ -112,7 +112,7 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
     selector: '[data-tour="integrations-workspace"]',
     padding: 10,
     title: "Settings section",
-    description: "Manage onboarding profile, repo tracking, teammate posting, and API configuration from one settings hub.",
+    description: "Manage onboarding profile details, AI-powered idea generation, and security guidance from one settings hub.",
   },
   {
     target: "main",

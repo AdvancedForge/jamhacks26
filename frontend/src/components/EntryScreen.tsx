@@ -57,7 +57,7 @@ export default function EntryScreen({
   }, [mode]);
 
   const modeDescription = useMemo(() => {
-    if (mode === "signin") return "Continue with your existing HackBuddy account.";
+    if (mode === "signin") return "Continue with your existing HackPilot account.";
     if (mode === "signup") return "Only needed if you want teammate matching and invites.";
     if (mode === "create-room") return "Start a shared workspace and invite your team.";
     if (mode === "join-room") return "Paste a room code from a teammate to continue.";
@@ -193,17 +193,15 @@ export default function EntryScreen({
                   <rect x="14" y="14" width="9" height="6" rx="1.5" fill="#ffffff" fillOpacity=".3" />
                 </svg>
               </div>
-              <span className="text-xl font-semibold tracking-tight">
-                Hack<span className="text-[#a1a1aa]">Buddy</span>
-              </span>
+              <span className="text-xl font-semibold tracking-tight">HackPilot</span>
             </div>
 
             <h1 className="mt-6 text-3xl font-semibold leading-tight tracking-tight md:text-[34px]">
               One room for your whole hackathon workflow.
             </h1>
             <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-[#c4c4cc]">
-              HackBuddy keeps your team aligned with task planning, whiteboard-to-code generation, and
-              progress updates in one shared space.
+              HackPilot keeps your team aligned with task planning, whiteboard-to-code generation, and
+              HackBuddy AI support in one shared space.
             </p>
 
             <div className="mt-6 grid gap-3 sm:grid-cols-3">

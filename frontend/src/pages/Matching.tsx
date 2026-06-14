@@ -288,7 +288,7 @@ export default function MatchingPage({
             Hackathon: <span className="text-[#d4d4d8]">{profile.hackathonId || "default"}</span>
           </p>
           <p className="text-[14px] text-[#a1a1aa] mt-4">
-            Invite collaborators, respond to invites, and leave teammaking whenever your team is ready for a board.
+            Invite collaborators, respond to invites, and leave teammaking to open your board when your team is ready.
           </p>
           {(status.room_id || status.invite_code) && (
             <div className="mt-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3">
@@ -303,7 +303,7 @@ export default function MatchingPage({
               disabled={leaving}
               className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl disabled:opacity-50"
             >
-              {leaving ? "Leaving..." : "Leave Teammaking"}
+              {leaving ? "Leaving..." : "Leave Teammaking (Open Board)"}
             </button>
             {!status.looking_for_team && (
               <button
@@ -401,7 +401,7 @@ export default function MatchingPage({
               <button
                 onClick={() => void leaveTeam()}
                 disabled={leavingTeam}
-                className="bg-white/[0.05] border border-white/[0.08] text-white text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+                className="bg-red-500/[0.16] border border-red-500/60 text-red-100 text-[13px] px-4 py-2 rounded-lg hover:bg-red-500/[0.24] disabled:opacity-50"
               >
                 {leavingTeam ? "Leaving team..." : "Leave Team"}
               </button>

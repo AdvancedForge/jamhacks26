@@ -9,7 +9,6 @@ import time
 import traceback
 import uuid
 from typing import Any, Dict, List, Optional
-import requests
 
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -94,18 +93,6 @@ class UserProfileIdeasPayload(BaseModel):
     vibe: str
     count: Optional[int] = 5
 
-
-class DiscordTeam8sPayload(BaseModel):
-    room_id: str
-    name: str
-    skills: List[str] = Field(default_factory=list)
-    interest: str
-    vibe: str
-    discord_username: Optional[str] = None
-    discord_handle: Optional[str] = None
-    looking_for: Optional[str] = None
-    availability: Optional[str] = None
-    webhook_url: Optional[str] = None
 
 
 class MatchmakingEnrollPayload(BaseModel):
@@ -1095,6 +1082,7 @@ class ChatMessage(BaseModel):
     message: str
     client_nonce: Optional[str] = None
     model: Optional[str] = None
+    roadmap_selection: Optional[str] = None
     whiteboard_image_base64: Optional[str] = None
     whiteboard_image_mime_type: Optional[str] = None
 
@@ -1369,21 +1357,21 @@ async def clear_chat_messages(room_id: str, sender: str = "You"):
 @app.post("/api/chat/message")
 async def send_chat_message(
     chat: ChatMessage,
-    x_gemini_api_key: Optional[str] = Header(None),
     x_gemini_model: Optional[str] = Header(None),
 ):
     if _is_clear_chat_command(chat.message):
         return await _clear_room_chat_messages(chat.room_id, chat.sender)
-    custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
-    if custom_key:
-        genai.configure(api_key=custom_key)
     selected_model, _intent_model, reply_model = _create_chat_models(
         chat.model or x_gemini_model
     )
     db_connected = await is_db_connected()
     message_dict = chat.model_dump(
         exclude_none=True,
-        exclude={"whiteboard_image_base64", "whiteboard_image_mime_type"},
+        exclude={
+            "roadmap_selection",
+            "whiteboard_image_base64",
+            "whiteboard_image_mime_type",
+        },
     )
     message_dict["model"] = selected_model
     message_dict["timestamp"] = datetime.now().isoformat()
@@ -1465,6 +1453,11 @@ async def send_chat_message(
                 ]
             )
             roadmap_content = board_data.get("roadmap", "No roadmap content.")
+            roadmap_selection = "No roadmap text selection provided."
+            if chat.roadmap_selection:
+                selection_text = " ".join(str(chat.roadmap_selection).split()).strip()
+                if selection_text:
+                    roadmap_selection = selection_text[:1200]
             room_members = await _get_room_members(chat.room_id)
             profile = await _get_room_profile(chat.room_id, chat.sender)
             profile_summary = (
@@ -1504,6 +1497,7 @@ async def send_chat_message(
                 f"Team members (valid assignees): {member_summary}\n"
                 f"Whiteboard: {whiteboard_summary}\n"
                 f"Whiteboard image context: {whiteboard_image_hint}\n"
+                f"Roadmap text selection: {roadmap_selection}\n"
                 f"Tasks:\n{tasks_summary}\n"
                 f"Roadmap:\n{roadmap_content}\n"
                 f"---------------\n"
@@ -2529,48 +2523,6 @@ async def generate_profile_ideas(payload: UserProfileIdeasPayload):
     return {"ok": True, "ideas": fallback[:requested_count]}
 
 
-@app.post("/api/discord/team8s")
-async def post_discord_team8s(payload: DiscordTeam8sPayload):
-    profile_doc = await _upsert_profile_record(
-        room_id=payload.room_id,
-        name=payload.name,
-        skills=payload.skills,
-        interest=payload.interest,
-        vibe=payload.vibe,
-    )
-    handle = (payload.discord_handle or "").strip()
-    looking_for = (payload.looking_for or "frontend/backend/design teammates").strip()
-    availability = (payload.availability or "active this weekend").strip()
-    skills_line = ", ".join(profile_doc["skills"]) if profile_doc["skills"] else "generalist"
-    profile_line = (
-        f"🚀 **Team8s Finder**\n"
-        f"**Name:** {profile_doc['name']}\n"
-        f"**Interest:** {profile_doc['interest']}\n"
-        f"**Vibe:** {profile_doc['vibe']}\n"
-        f"**Skills:** {skills_line}\n"
-        f"**Looking For:** {looking_for}\n"
-        f"**Availability:** {availability}\n"
-        f"**Room:** `{payload.room_id}`"
-    )
-    if handle:
-        profile_line += f"\n**Discord:** {handle}"
-    webhook_url = (payload.webhook_url or os.getenv("DISCORD_TEAM8_WEBHOOK_URL") or "").strip()
-    posted = False
-    error: Optional[str] = None
-    if webhook_url:
-        try:
-            response = requests.post(
-                webhook_url,
-                json={"content": profile_line},
-                timeout=8,
-            )
-            posted = 200 <= response.status_code < 300
-            if not posted:
-                error = f"Discord webhook rejected payload ({response.status_code})."
-        except Exception as webhook_error:
-            error = f"Discord webhook failed: {webhook_error}"
-    return {"ok": True, "posted": posted, "preview": profile_line, "error": error}
-
 
 # --- Kanban Endpoints ---
 
@@ -2869,11 +2821,7 @@ async def save_whiteboard_scene(room_id: str, payload: WhiteboardScenePayload):
 async def generate_whiteboard(
     room_id: str,
     data: WhiteboardGeneratePayload,
-    x_gemini_api_key: Optional[str] = Header(None),
 ):
-    custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
-    if custom_key:
-        genai.configure(api_key=custom_key)
     try:
         image_data, image_mime_type = _decode_image_payload(data.image_base64)
     except ValueError as error:
@@ -2916,11 +2864,7 @@ async def generate_whiteboard(
 async def analyze_whiteboard(
     room_id: str,
     data: dict,
-    x_gemini_api_key: Optional[str] = Header(None),
 ):
-    custom_key = x_gemini_api_key or os.getenv("GOOGLE_API_KEY")
-    if custom_key:
-        genai.configure(api_key=custom_key)
 
     image_b64 = data.get("image_base64")
     if not image_b64:
@@ -3007,27 +2951,6 @@ async def get_whiteboard_job(job_id: str):
         "error": None,
     }
 
-
-# --- Git Endpoints ---
-
-
-@app.get("/api/git/{room_id}")
-async def get_git_commits(room_id: str):
-    if await is_db_connected():
-        commits = await db.git_events.find({"room_id": room_id}).to_list(length=50)
-        for commit in commits:
-            commit["id"] = str(commit.pop("_id"))
-        return {"commits": commits}
-    return {"commits": []}
-
-
-@app.post("/api/git/{room_id}/connect")
-async def connect_git(room_id: str):
-    if await is_db_connected():
-        await db.rooms.update_one(
-            {"room_id": room_id}, {"$set": {"git_connected": True}}, upsert=True
-        )
-    return {"ok": True}
 
 
 # --- Voice Endpoints ---

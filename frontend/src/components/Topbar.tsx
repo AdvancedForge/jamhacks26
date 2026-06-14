@@ -48,7 +48,7 @@ export default function Topbar({
             <rect x="14" y="14" width="9" height="6" rx="1.5" fill="#ffffff" fillOpacity=".3" />
           </svg>
         </div>
-        <span className="text-white text-[15px] font-semibold tracking-tight hidden sm:block">HackBuddy</span>
+        <span className="text-white text-[15px] font-semibold tracking-tight hidden sm:block">HackPilot</span>
       </div>
 
       <nav ref={navRef} data-tour="top-nav" className="flex gap-1 bg-white/2 border border-white/4 rounded-lg p-1">
