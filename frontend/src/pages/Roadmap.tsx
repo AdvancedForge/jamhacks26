@@ -153,7 +153,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
           {/* Vision Section */}
           <div className="w-1/2 h-full bg-[#0a0b0d] border border-white/10 rounded-lg text-white p-4 flex flex-col">
             <div className="flex justify-between items-center mb-4 flex-none">
-                <h3 className="font-bold">Vision</h3>
+                <h3 className="font-bold">Project Vision (Markdown)</h3>
                 <button
                     onClick={() => setIsEditingVision(!isEditingVision)}
                     className="px-2 py-1 bg-white/10 hover:bg-white/20 rounded text-xs transition-all"
@@ -166,6 +166,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
                 <textarea
                   className="w-full h-full bg-transparent outline-none resize-none overflow-y-auto"
                   value={roadmap.vision}
+                  placeholder="Describe your project vision in detail using markdown..."
                   onChange={(e) => saveRoadmap({ ...roadmap, vision: e.target.value })}
                 />
               ) : (
