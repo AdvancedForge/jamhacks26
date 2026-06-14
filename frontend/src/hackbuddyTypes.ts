@@ -22,10 +22,22 @@ export interface ChatMessage {
 }
 
 export type OnboardingProfile = {
+  hackathonId: string;
   name: string;
   skills: string[];
   interest: string;
   vibe: string;
+};
+
+export type AuthUser = {
+  username: string;
+  hackathon_id: string;
+  skills: string[];
+  interest: string;
+  vibe: string;
+  room_id?: string | null;
+  team_id?: string | null;
+  invite_code?: string | null;
 };
 
 export type Task = {
@@ -39,4 +51,4 @@ export type Task = {
   deleted?: boolean;
 };
 
-export type AppPage = "Kanban" | "Whiteboard" | "Integrations" | "Roadmap";
+export type AppPage = "Matching" | "Kanban" | "Whiteboard" | "Integrations" | "Roadmap";

@@ -1,12 +1,14 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import EntryScreen from "./components/EntryScreen";
 import ToastList from "./components/ToastList";
 import Topbar from "./components/Topbar";
 import { useToasts } from "./hooks/useToasts";
-import type { AppPage, OnboardingProfile } from "./hackbuddyTypes";
+import type { AppPage, AuthUser, OnboardingProfile } from "./hackbuddyTypes";
 import BoardPage from "./pages/Board";
 import WhiteboardPage from "./pages/Whiteboard";
 import IntegrationsPage from "./pages/Integrations";
+import MatchingPage from "./pages/Matching";
+import { apiFetch } from "./hackbuddyApi";
 
 import RoadmapPage from "./pages/Roadmap";
 const PROFILE_STORAGE_KEY = "hb_profile";
@@ -17,6 +19,7 @@ const readStoredProfile = (): OnboardingProfile | null => {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<OnboardingProfile>;
     if (!parsed || typeof parsed !== "object") return null;
+    const hackathonId = typeof parsed.hackathonId === "string" ? parsed.hackathonId.trim() : "default";
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
     const interest = typeof parsed.interest === "string" ? parsed.interest.trim() : "";
     const vibe = typeof parsed.vibe === "string" ? parsed.vibe.trim() : "";
@@ -24,24 +27,39 @@ const readStoredProfile = (): OnboardingProfile | null => {
       ? parsed.skills.map((skill) => String(skill).trim()).filter(Boolean)
       : [];
     if (!name || !interest || !vibe) return null;
-    return { name, interest, vibe, skills };
+    return { hackathonId: hackathonId || "default", name, interest, vibe, skills };
   } catch {
     return null;
   }
 };
 
 export default function App() {
-  const [roomCode, setRoomCode] = useState(() => localStorage.getItem("hb_room") || "");
-  const [page, setPage] = useState<AppPage>(() => (localStorage.getItem("hb_page") as AppPage) || "Kanban");
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem("hb_auth_token") || "");
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => {
+    try {
+      const raw = localStorage.getItem("hb_auth_user");
+      return raw ? (JSON.parse(raw) as AuthUser) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [roomCode, setRoomCode] = useState(() => (authUser?.room_id || "").toString());
+  const [page, setPage] = useState<AppPage>(() => (localStorage.getItem("hb_page") as AppPage) || "Matching");
   const [profile, setProfile] = useState<OnboardingProfile | null>(() => readStoredProfile());
   const [polledAt, setPolledAt] = useState(Date.now());
   const { toasts, add: toast } = useToasts();
   const handlePoll = useCallback(() => setPolledAt(Date.now()), []);
-  const handleEnter = (code: string, onboardingProfile: OnboardingProfile) => {
-    setRoomCode(code);
-    setPage("Kanban");
+
+  const handleAuthenticated = (token: string, user: AuthUser, onboardingProfile: OnboardingProfile) => {
+    setAuthToken(token);
+    setAuthUser(user);
+    setRoomCode((user.room_id || "").toString());
+    setPage("Matching");
     setProfile(onboardingProfile);
+    localStorage.setItem("hb_auth_token", token);
+    localStorage.setItem("hb_auth_user", JSON.stringify(user));
     localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(onboardingProfile));
+    localStorage.setItem("hb_page", "Matching");
   };
 
   const handleProfileUpdate = (nextProfile: OnboardingProfile) => {
@@ -53,11 +71,35 @@ export default function App() {
     setPage(newPage);
     localStorage.setItem("hb_page", newPage);
   };
+  useEffect(() => {
+    if (!authToken) return;
+    const refresh = async () => {
+      try {
+        const response = await apiFetch<{ user?: AuthUser }>("/api/auth/me", {
+          headers: { "X-Auth-Token": authToken },
+        });
+        if (response.user) {
+          setAuthUser(response.user);
+          setRoomCode((response.user.room_id || "").toString());
+          localStorage.setItem("hb_auth_user", JSON.stringify(response.user));
+        }
+      } catch {
+        // keep local session state as fallback
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, 4000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [authToken]);
 
-  if (!roomCode) {
+  if (!authToken || !authUser || !profile) {
     return (
       <>
-        <EntryScreen onEnter={handleEnter} />
+        <EntryScreen onAuthenticated={handleAuthenticated} />
         <ToastList toasts={toasts} />
       </>
     );
@@ -82,7 +124,10 @@ export default function App() {
       <Topbar roomCode={roomCode} page={page} onNav={handleNav} polledAt={polledAt} />
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {page === "Kanban" && (
+        {(!roomCode || page === "Matching") && (
+          <MatchingPage profile={profile} authToken={authToken} toast={toast} />
+        )}
+        {page === "Kanban" && roomCode && (
           <BoardPage
             roomCode={roomCode}
             toast={toast}
@@ -90,8 +135,8 @@ export default function App() {
             currentUserName={profile?.name}
           />
         )}
-        {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
-        {page === "Integrations" && (
+        {page === "Whiteboard" && roomCode && <WhiteboardPage roomCode={roomCode} toast={toast} />}
+        {page === "Integrations" && roomCode && (
           <IntegrationsPage
             roomCode={roomCode}
             toast={toast}
@@ -99,7 +144,7 @@ export default function App() {
             onProfileChange={handleProfileUpdate}
           />
         )}
-        {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
+        {page === "Roadmap" && roomCode && <RoadmapPage roomCode={roomCode} toast={toast} />}
       </main>
 
       <ToastList toasts={toasts} />

@@ -63,6 +63,7 @@ export default function IntegrationsPage({
   };
 
   const buildProfile = (): OnboardingProfile => ({
+    hackathonId: profile?.hackathonId || "default",
     name: name.trim(),
     skills: parseSkills(skillsInput),
     interest: interest.trim(),
@@ -85,6 +86,17 @@ export default function IntegrationsPage({
         method: "POST",
         body: JSON.stringify({
           room_id: roomCode,
+          name: nextProfile.name,
+          skills: nextProfile.skills,
+          interest: nextProfile.interest,
+          vibe: nextProfile.vibe,
+        }),
+      });
+      await apiFetch("/api/matchmaking/enroll", {
+        method: "POST",
+        body: JSON.stringify({
+          room_id: roomCode,
+          hackathon_id: nextProfile.hackathonId || "default",
           name: nextProfile.name,
           skills: nextProfile.skills,
           interest: nextProfile.interest,
