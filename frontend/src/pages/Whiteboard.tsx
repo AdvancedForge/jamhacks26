@@ -5,8 +5,8 @@ import { WS_BASE, apiFetch } from "../hackbuddyApi";
 import type { ToastFn, ChatMessage } from "../hackbuddyTypes";
 import { useBoardWebSocket } from '../hooks/useBoardWebSocket';
 import { ChatWindow } from '../components/ChatWindow';
+import { AI_CONFIG_UPDATED_EVENT, DEFAULT_CHAT_MODELS, getAiHeaders } from "../aiConfig";
 const CHAT_MODEL_STORAGE_KEY = "hackpilot_chat_model";
-const FALLBACK_CHAT_MODELS = ["gemma-4-31b-it", "gemini-2.5-flash", "gemini-2.5-pro"];
 const isClearChatCommand = (value: string) => {
   const command = value.trim().toLowerCase().split(/\s+/)[0];
   return command === "/clear" || command === "/clear-chat" || command === "/clearchat";
@@ -49,9 +49,9 @@ export default function WhiteboardPage({
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isAiThinking, setIsAiThinking] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || FALLBACK_CHAT_MODELS[0]);
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || DEFAULT_CHAT_MODELS[0]);
   const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>(
-    FALLBACK_CHAT_MODELS.map((modelName) => ({
+    DEFAULT_CHAT_MODELS.map((modelName) => ({
       value: modelName,
       label: formatModelLabel(modelName),
     })),
@@ -66,6 +66,7 @@ export default function WhiteboardPage({
   const saveRequestIdRef = useRef(0);
   const hasLoadedInitialSceneRef = useRef(false);
   const actorIdRef = useRef(`wb_${Math.random().toString(36).slice(2, 10)}`);
+  const chatSendInFlightRef = useRef(false);
 
   const mergeChatMessages = useCallback((currentMessages: ChatMessage[], incomingMessages: ChatMessage[]) => {
     const nextMessages = [...currentMessages];
@@ -158,7 +159,9 @@ export default function WhiteboardPage({
 
   const fetchChatModels = useCallback(async () => {
     try {
-      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`);
+      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`, {
+        headers: getAiHeaders(),
+      });
       const modelNames = (data.models || []).filter((modelName) => modelName.trim().length > 0);
       if (modelNames.length === 0) return;
       const options = modelNames.map((modelName) => ({
@@ -196,6 +199,13 @@ export default function WhiteboardPage({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [fetchChatModels]);
+  useEffect(() => {
+    const handleAiConfigUpdated = () => {
+      fetchChatModels().catch(() => {});
+    };
+    window.addEventListener(AI_CONFIG_UPDATED_EVENT, handleAiConfigUpdated);
+    return () => window.removeEventListener(AI_CONFIG_UPDATED_EVENT, handleAiConfigUpdated);
+  }, [fetchChatModels]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -207,6 +217,10 @@ export default function WhiteboardPage({
   const handleSendMessage = async (text: string) => {
     const message = text.trim();
     if (!message) return;
+    if (isAiThinking || chatSendInFlightRef.current) {
+      toast("Only one AI message at a time — wait for the current response to finish.", "warn");
+      return;
+    }
     if (isClearChatCommand(message)) {
       try {
         const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(
@@ -228,11 +242,12 @@ export default function WhiteboardPage({
       timestamp: new Date().toISOString(),
       client_nonce: clientNonce,
     });
+    chatSendInFlightRef.current = true;
     try {
       const whiteboardImage = await exportCurrentWhiteboardImage();
       const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
-        headers: { "X-Gemini-Model": selectedModel },
+        headers: { "X-Gemini-Model": selectedModel, ...getAiHeaders() },
         body: JSON.stringify({
           room_id: roomCode,
           sender: "You",
@@ -245,10 +260,17 @@ export default function WhiteboardPage({
       if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
       }
-    } catch {
+    } catch (error) {
       setChatMessages((currentMessages) => currentMessages.filter((entry) => entry.client_nonce !== clientNonce));
       setIsAiThinking(false);
-      toast("Failed to send chat message.", "warn");
+      const messageText = error instanceof Error ? error.message : "";
+      if (messageText) {
+        toast(messageText, "warn");
+      } else {
+        toast("Failed to send chat message.", "warn");
+      }
+    } finally {
+      chatSendInFlightRef.current = false;
     }
   };
 

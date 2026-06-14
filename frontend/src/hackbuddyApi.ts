@@ -19,6 +19,18 @@ export async function apiFetch<T = any>(path: string, opts: RequestInit = {}): P
     ...opts,
     headers,
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const payload = await res.json();
+      const detail = payload?.detail;
+      if (typeof detail === "string" && detail.trim()) {
+        message = detail.trim();
+      }
+    } catch {
+      // Fallback to status text.
+    }
+    throw new Error(message);
+  }
   return res.json();
 }

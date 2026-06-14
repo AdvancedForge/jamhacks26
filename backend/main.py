@@ -9,6 +9,7 @@ import time
 import traceback
 import uuid
 from typing import Any, Dict, List, Optional
+import requests
 
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -1093,14 +1094,20 @@ import google.generativeai as genai
 
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_GEMINI_MODEL", "gemma-4-31b-it")
+DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_GEMINI_MODEL", "gemini-3.1-flash-lite")
 WHITEBOARD_VISION_MODEL = os.getenv("WHITEBOARD_VISION_MODEL", "gemini-2.5-flash")
 SUPPORTED_CHAT_MODELS = [
-    "gemma-4-31b-it",
-    "gemma-4-26b-a4b-it",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
 ]
+DEFAULT_KEY_RATE_LIMIT_MAX_REQUESTS = int(
+    os.getenv("DEFAULT_KEY_RATE_LIMIT_MAX_REQUESTS", "8")
+)
+DEFAULT_KEY_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("DEFAULT_KEY_RATE_LIMIT_WINDOW_SECONDS", "60")
+)
 CHAT_SYSTEM_INSTRUCTION = (
     "You are HackBuddy AI, a friendly and helpful project board assistant. "
     "Your task is to reply conversationally to the user message in 1 to 3 short sentences. "
@@ -1112,6 +1119,9 @@ model = genai.GenerativeModel(DEFAULT_CHAT_MODEL)
 chat_model = genai.GenerativeModel(
     DEFAULT_CHAT_MODEL, system_instruction=(CHAT_SYSTEM_INSTRUCTION)
 )
+shared_key_rate_limit_buckets: Dict[str, List[float]] = {}
+active_ai_room_requests: set[str] = set()
+active_ai_room_requests_lock = asyncio.Lock()
 
 
 def _create_whiteboard_models() -> tuple[Any, Any]:
@@ -1155,6 +1165,159 @@ def _create_chat_models(model_name: Optional[str]) -> tuple[str, Any, Any]:
     except Exception as error:
         logger.warning(f"Could not initialize Gemini model '{resolved_model}': {error}")
         return DEFAULT_CHAT_MODEL, model, chat_model
+
+
+def _parse_model_list(raw_models: Optional[str]) -> List[str]:
+    if not raw_models:
+        return []
+    parsed = [
+        token.strip()
+        for token in str(raw_models).replace("\n", ",").split(",")
+        if token.strip()
+    ]
+    seen: set[str] = set()
+    unique_models: List[str] = []
+    for token in parsed:
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_models.append(token)
+    return unique_models
+
+
+def _resolve_custom_model_name(
+    requested_model: Optional[str], custom_models: List[str]
+) -> str:
+    candidate = (requested_model or "").strip()
+    if candidate:
+        return candidate
+    if custom_models:
+        return custom_models[0]
+    return "custom-model"
+
+
+def _validate_custom_request_url(raw_url: str) -> str:
+    candidate = (raw_url or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="Custom AI request URL is required.")
+    if not re.match(r"^https?://", candidate, re.IGNORECASE):
+        raise HTTPException(
+            status_code=400,
+            detail="Custom AI request URL must start with http:// or https://.",
+        )
+    return candidate
+
+
+def _extract_custom_provider_reply(response_payload: Any) -> str:
+    if not isinstance(response_payload, dict):
+        return ""
+    direct_fields = ["output_text", "response", "content", "message"]
+    for field in direct_fields:
+        value = response_payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    choices = response_payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        if isinstance(first_choice, dict):
+            message_obj = first_choice.get("message")
+            if isinstance(message_obj, dict):
+                content = message_obj.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+                if isinstance(content, list):
+                    text_parts = []
+                    for item in content:
+                        if not isinstance(item, dict):
+                            continue
+                        maybe_text = item.get("text")
+                        if isinstance(maybe_text, str) and maybe_text.strip():
+                            text_parts.append(maybe_text.strip())
+                    if text_parts:
+                        return "\n".join(text_parts)
+            text_field = first_choice.get("text")
+            if isinstance(text_field, str) and text_field.strip():
+                return text_field.strip()
+    return ""
+
+
+def _generate_custom_provider_reply(
+    *,
+    request_url: str,
+    api_key: str,
+    model_name: str,
+    prompt: str,
+) -> str:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": CHAT_SYSTEM_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.4,
+    }
+    response = requests.post(request_url, json=payload, headers=headers, timeout=45)
+    if response.status_code < 200 or response.status_code >= 300:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Custom AI provider request failed "
+                f"({response.status_code}). Check API key, URL, and model."
+            ),
+        )
+    try:
+        response_payload = response.json()
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Custom AI provider response was not valid JSON.",
+        )
+    reply = _extract_custom_provider_reply(response_payload)
+    if not reply:
+        raise HTTPException(
+            status_code=502,
+            detail="Custom AI provider response did not include readable text output.",
+        )
+    return reply
+
+
+def _enforce_shared_key_rate_limit(room_id: str, sender: str) -> None:
+    now = time.time()
+    bucket_key = f"{room_id}:{(sender or 'unknown').strip().lower() or 'unknown'}"
+    window_start = now - DEFAULT_KEY_RATE_LIMIT_WINDOW_SECONDS
+    bucket = [
+        timestamp
+        for timestamp in shared_key_rate_limit_buckets.get(bucket_key, [])
+        if timestamp >= window_start
+    ]
+    if len(bucket) >= DEFAULT_KEY_RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Only one AI message at a time, and shared-key usage is rate-limited. "
+                "Add your own API key in Settings to remove this shared limit."
+            ),
+        )
+    bucket.append(now)
+    shared_key_rate_limit_buckets[bucket_key] = bucket
+
+
+async def _acquire_ai_room_request_slot(room_id: str) -> bool:
+    async with active_ai_room_requests_lock:
+        if room_id in active_ai_room_requests:
+            return False
+        active_ai_room_requests.add(room_id)
+        return True
+
+
+async def _release_ai_room_request_slot(room_id: str) -> None:
+    async with active_ai_room_requests_lock:
+        active_ai_room_requests.discard(room_id)
 
 
 def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
@@ -1318,7 +1481,10 @@ def _safe_chat_fallback(user_message: str, task_title: Optional[str] = None) -> 
 
 # --- Chat Endpoints ---
 @app.get("/api/chat/models")
-async def get_chat_models():
+async def get_chat_models(x_ai_models: Optional[str] = Header(None)):
+    custom_models = _parse_model_list(x_ai_models)
+    if custom_models:
+        return {"models": custom_models, "default_model": custom_models[0]}
     return {"models": SUPPORTED_CHAT_MODELS, "default_model": DEFAULT_CHAT_MODEL}
 
 
@@ -1358,275 +1524,329 @@ async def clear_chat_messages(room_id: str, sender: str = "You"):
 async def send_chat_message(
     chat: ChatMessage,
     x_gemini_model: Optional[str] = Header(None),
+    x_ai_api_key: Optional[str] = Header(None),
+    x_ai_request_url: Optional[str] = Header(None),
+    x_ai_models: Optional[str] = Header(None),
 ):
     if _is_clear_chat_command(chat.message):
         return await _clear_room_chat_messages(chat.room_id, chat.sender)
-    selected_model, _intent_model, reply_model = _create_chat_models(
-        chat.model or x_gemini_model
-    )
-    db_connected = await is_db_connected()
-    message_dict = chat.model_dump(
-        exclude_none=True,
-        exclude={
-            "roadmap_selection",
-            "whiteboard_image_base64",
-            "whiteboard_image_mime_type",
-        },
-    )
-    message_dict["model"] = selected_model
-    message_dict["timestamp"] = datetime.now().isoformat()
-
-    if db_connected:
-        result = await db.chat_messages.insert_one(message_dict)
-        message_dict["id"] = str(result.inserted_id)
-        message_dict.pop("_id", None)
-    else:
-        message_dict["id"] = f"temp_{int(time.time() * 1000)}"
-
-    # Broadcast chat message even when DB is unavailable.
-    await manager.broadcast(
-        chat.room_id, {"type": "CHAT_MESSAGE", "message": message_dict}
-    )
-    await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": True})
-
-    task_title: Optional[str] = None
-    ai_model_used = selected_model
-
-    # Unified AI Intent and Reply
+    if not await _acquire_ai_room_request_slot(chat.room_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Only one AI message can be processed at a time. "
+                "Please wait for the current AI response to finish."
+            ),
+        )
+    thinking_started = False
     try:
-        whiteboard_image_part: Optional[Dict[str, Any]] = None
-        whiteboard_image_hint = "No whiteboard image attachment was provided."
-        if chat.whiteboard_image_base64:
-            try:
-                image_data, detected_mime_type = _decode_image_payload(
-                    chat.whiteboard_image_base64,
-                    chat.whiteboard_image_mime_type or "image/png",
-                )
-                whiteboard_image_part = {
-                    "mime_type": detected_mime_type,
-                    "data": image_data,
-                }
-                whiteboard_image_hint = (
-                    "A current whiteboard snapshot image is attached. Use it to infer "
-                    "layout structure, visual intent, and symbols (including smiley-like doodles)."
-                )
-            except ValueError as decode_error:
-                logger.warning(f"Skipping invalid whiteboard image payload: {decode_error}")
+        custom_models = _parse_model_list(x_ai_models)
+        custom_api_key = (x_ai_api_key or "").strip()
+        custom_request_url = (x_ai_request_url or "").strip()
+        use_custom_provider = bool(custom_api_key and custom_request_url)
+        if use_custom_provider:
+            selected_model = _resolve_custom_model_name(
+                chat.model or x_gemini_model, custom_models
+            )
+            validated_request_url = _validate_custom_request_url(custom_request_url)
+            _intent_model = None
+            reply_model = None
+        else:
+            _enforce_shared_key_rate_limit(chat.room_id, chat.sender)
+            selected_model, _intent_model, reply_model = _create_chat_models(
+                chat.model or x_gemini_model
+            )
+            validated_request_url = ""
 
-        whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
-        whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
-        if _is_whiteboard_code_request(chat.message):
-            target = _infer_code_target(chat.message)
-            if whiteboard_image_part:
-                whiteboard_generation_model, _ = _create_whiteboard_models()
-                response = await whiteboard_generation_model.generate_content_async(
+        db_connected = await is_db_connected()
+        message_dict = chat.model_dump(
+            exclude_none=True,
+            exclude={
+                "roadmap_selection",
+                "whiteboard_image_base64",
+                "whiteboard_image_mime_type",
+            },
+        )
+        message_dict["model"] = selected_model
+        message_dict["timestamp"] = datetime.now().isoformat()
+
+        if db_connected:
+            result = await db.chat_messages.insert_one(message_dict)
+            message_dict["id"] = str(result.inserted_id)
+            message_dict.pop("_id", None)
+        else:
+            message_dict["id"] = f"temp_{int(time.time() * 1000)}"
+
+        await manager.broadcast(
+            chat.room_id, {"type": "CHAT_MESSAGE", "message": message_dict}
+        )
+        await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": True})
+        thinking_started = True
+
+        task_title: Optional[str] = None
+        ai_model_used = selected_model
+
+        try:
+            whiteboard_image_part: Optional[Dict[str, Any]] = None
+            whiteboard_image_hint = "No whiteboard image attachment was provided."
+            if chat.whiteboard_image_base64:
+                try:
+                    image_data, detected_mime_type = _decode_image_payload(
+                        chat.whiteboard_image_base64,
+                        chat.whiteboard_image_mime_type or "image/png",
+                    )
+                    whiteboard_image_part = {
+                        "mime_type": detected_mime_type,
+                        "data": image_data,
+                    }
+                    whiteboard_image_hint = (
+                        "A current whiteboard snapshot image is attached. Use it to infer "
+                        "layout structure, visual intent, and symbols (including smiley-like doodles)."
+                    )
+                except ValueError as decode_error:
+                    logger.warning(
+                        f"Skipping invalid whiteboard image payload: {decode_error}"
+                    )
+
+            whiteboard_scene = await _get_room_whiteboard_scene(chat.room_id, db_connected)
+            whiteboard_summary = _summarize_whiteboard_scene(whiteboard_scene)
+            if _is_whiteboard_code_request(chat.message):
+                target = _infer_code_target(chat.message)
+                if use_custom_provider:
+                    whiteboard_prompt = _build_whiteboard_chat_code_prompt(
+                        target=target,
+                        user_message=chat.message,
+                        whiteboard_summary=whiteboard_summary,
+                    )
+                    ai_reply = _generate_custom_provider_reply(
+                        request_url=validated_request_url,
+                        api_key=custom_api_key,
+                        model_name=selected_model,
+                        prompt=whiteboard_prompt,
+                    )
+                elif whiteboard_image_part:
+                    whiteboard_generation_model, _ = _create_whiteboard_models()
+                    response = await whiteboard_generation_model.generate_content_async(
+                        [
+                            _build_whiteboard_chat_code_prompt(
+                                target=target,
+                                user_message=chat.message,
+                                whiteboard_summary=whiteboard_summary,
+                            ),
+                            whiteboard_image_part,
+                        ]
+                    )
+                    ai_model_used = WHITEBOARD_VISION_MODEL
+                    ai_reply = _strip_markdown_code_fences(response.text)
+                else:
+                    fallback_prompt = (
+                        f'User message: "{chat.message}"\n'
+                        f"Whiteboard summary: {whiteboard_summary}\n"
+                        f"Generate simple {target} code. Return only code and no explanation."
+                    )
+                    response = await reply_model.generate_content_async(fallback_prompt)
+                    ai_reply = _strip_markdown_code_fences(response.text)
+                if not ai_reply:
+                    ai_reply = (
+                        "I couldn't generate code from the sketch yet. Try adding clearer labels "
+                        "to the whiteboard and ask again."
+                    )
+            else:
+                board_data = await get_board(chat.room_id)
+                tasks_summary = "\n".join(
                     [
-                        _build_whiteboard_chat_code_prompt(
-                            target=target,
-                            user_message=chat.message,
-                            whiteboard_summary=whiteboard_summary,
-                        ),
-                        whiteboard_image_part,
+                        f"- ID: {t['id']}, Title: {t['title']}, Status: {t['column']}"
+                        for t in board_data.get("tasks", [])
                     ]
                 )
-                ai_model_used = WHITEBOARD_VISION_MODEL
-            else:
-                fallback_prompt = (
-                    f'User message: "{chat.message}"\n'
-                    f"Whiteboard summary: {whiteboard_summary}\n"
-                    f"Generate simple {target} code. Return only code and no explanation."
+                roadmap_content = board_data.get("roadmap", "No roadmap content.")
+                roadmap_selection = "No roadmap text selection provided."
+                if chat.roadmap_selection:
+                    selection_text = " ".join(str(chat.roadmap_selection).split()).strip()
+                    if selection_text:
+                        roadmap_selection = selection_text[:1200]
+                room_members = await _get_room_members(chat.room_id)
+                profile = await _get_room_profile(chat.room_id, chat.sender)
+                profile_summary = (
+                    _build_profile_summary(profile)
+                    if profile
+                    else "No onboarding profile has been provided yet."
                 )
-                response = await reply_model.generate_content_async(fallback_prompt)
-            ai_reply = _strip_markdown_code_fences(response.text)
-            if not ai_reply:
-                ai_reply = (
-                    "I couldn't generate code from the sketch yet. Try adding clearer labels "
-                    "to the whiteboard and ask again."
-                )
-        else:
-            # Fetch board data for task/roadmap-aware chat responses.
-            board_data = await get_board(chat.room_id)
-            tasks_summary = "\n".join(
-                [
-                    f"- ID: {t['id']}, Title: {t['title']}, Status: {t['column']}"
-                    for t in board_data.get("tasks", [])
-                ]
-            )
-            roadmap_content = board_data.get("roadmap", "No roadmap content.")
-            roadmap_selection = "No roadmap text selection provided."
-            if chat.roadmap_selection:
-                selection_text = " ".join(str(chat.roadmap_selection).split()).strip()
-                if selection_text:
-                    roadmap_selection = selection_text[:1200]
-            room_members = await _get_room_members(chat.room_id)
-            profile = await _get_room_profile(chat.room_id, chat.sender)
-            profile_summary = (
-                _build_profile_summary(profile)
-                if profile
-                else "No onboarding profile has been provided yet."
-            )
-            member_names = [
-                str(member.get("name", "")).strip()
-                for member in room_members
-                if str(member.get("name", "")).strip()
-            ]
-            member_summary = ", ".join(member_names) if member_names else "No known members yet."
-
-            prompt = (
-                "You are HackBuddy AI, a project board assistant. "
-                "You have access to the project board tasks and the roadmap. "
-                "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
-                'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": {"vision": "...", "phases": {"Phase Name": ["task_id_1"]}}}. '
-                '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
-                '"roadmap" must be a JSON object with "vision" (a comprehensive Markdown document explaining the project in detail) and "phases" (dictionary mapping phase names to arrays of task IDs). '
-                'Example: {"vision": "# Project Title\\n\\n## Vision\\n...detailed project description...", "phases": {"Phase 1": ["t_1"], "Phase 2": ["t_2"]}}. '
-                'Only return this if changes are explicitly requested. If a task ID exists in board tasks but is NOT in any phase, it is "Unassigned". '
-                '"reply" MUST be a direct, relevant answer to the user. '
-                'When setting "assignee" for tasks, use ONLY names from the provided team member list. '
-                "If the user asks a question, answer it based on the provided tasks and roadmap. "
-                "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
-                "If the request is unclear, politely ask for clarification. "
-                'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
-                "Do NOT include any other text, chain-of-thought, or prompt echoes."
-            )
-
-            full_prompt = (
-                f"{prompt}\n\n"
-                f"--- Context ---\n"
-                f"User profile: {profile_summary}\n"
-                f"Team members (valid assignees): {member_summary}\n"
-                f"Whiteboard: {whiteboard_summary}\n"
-                f"Whiteboard image context: {whiteboard_image_hint}\n"
-                f"Roadmap text selection: {roadmap_selection}\n"
-                f"Tasks:\n{tasks_summary}\n"
-                f"Roadmap:\n{roadmap_content}\n"
-                f"---------------\n"
-                f'User message: "{chat.message}"'
-            )
-            generation_payload: Any = full_prompt
-            if whiteboard_image_part:
-                generation_payload = [full_prompt, whiteboard_image_part]
-
-            try:
-                response = await reply_model.generate_content_async(generation_payload)
-            except Exception as multimodal_error:
-                if not whiteboard_image_part:
-                    raise
-                logger.warning(
-                    f"Primary chat model could not use whiteboard image, retrying with vision model: {multimodal_error}"
-                )
-                _, whiteboard_reply_model = _create_whiteboard_models()
-                response = await whiteboard_reply_model.generate_content_async(
-                    generation_payload
-                )
-                ai_model_used = WHITEBOARD_VISION_MODEL
-
-            result = _extract_json_object(response.text)
-
-            # 1. Handle Tasks
-            if result and "tasks" in result and isinstance(result["tasks"], list):
-                member_names_for_assignment = [
+                member_names = [
                     str(member.get("name", "")).strip()
                     for member in room_members
                     if str(member.get("name", "")).strip()
                 ]
-                for task_data in result["tasks"]:
-                    normalized_assignee = _normalize_assignee_name(
-                        task_data.get("assignee"), member_names_for_assignment
+                member_summary = (
+                    ", ".join(member_names) if member_names else "No known members yet."
+                )
+
+                prompt = (
+                    "You are HackBuddy AI, a project board assistant. "
+                    "You have access to the project board tasks and the roadmap. "
+                    "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
+                    'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": {"vision": "...", "phases": {"Phase Name": ["task_id_1"]}}}. '
+                    '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
+                    '"roadmap" must be a JSON object with "vision" (a comprehensive Markdown document explaining the project in detail) and "phases" (dictionary mapping phase names to arrays of task IDs). '
+                    'Example: {"vision": "# Project Title\\n\\n## Vision\\n...detailed project description...", "phases": {"Phase 1": ["t_1"], "Phase 2": ["t_2"]}}. '
+                    'Only return this if changes are explicitly requested. If a task ID exists in board tasks but is NOT in any phase, it is "Unassigned". '
+                    '"reply" MUST be a direct, relevant answer to the user. '
+                    'When setting "assignee" for tasks, use ONLY names from the provided team member list. '
+                    "If the user asks a question, answer it based on the provided tasks and roadmap. "
+                    "If a whiteboard image is attached, treat the visual sketch as primary context for UI ideas and symbols. "
+                    "If the request is unclear, politely ask for clarification. "
+                    'Do NOT use generic phrases like "I\'ve processed your request" or "Got your message!". '
+                    "Do NOT include any other text, chain-of-thought, or prompt echoes."
+                )
+
+                full_prompt = (
+                    f"{prompt}\n\n"
+                    f"--- Context ---\n"
+                    f"User profile: {profile_summary}\n"
+                    f"Team members (valid assignees): {member_summary}\n"
+                    f"Whiteboard: {whiteboard_summary}\n"
+                    f"Whiteboard image context: {whiteboard_image_hint}\n"
+                    f"Roadmap text selection: {roadmap_selection}\n"
+                    f"Tasks:\n{tasks_summary}\n"
+                    f"Roadmap:\n{roadmap_content}\n"
+                    f"---------------\n"
+                    f'User message: "{chat.message}"'
+                )
+
+                if use_custom_provider:
+                    response_text = _generate_custom_provider_reply(
+                        request_url=validated_request_url,
+                        api_key=custom_api_key,
+                        model_name=selected_model,
+                        prompt=full_prompt,
                     )
-                    # Check if it's an update (has id) or create
-                    if "id" in task_data:
-                        # Logic to update existing task
-                        task = Task(
-                            title=str(task_data.get("title") or "Untitled Task"),
-                            description=str(task_data.get("description") or ""),
-                            column=str(task_data.get("column") or "Backlog"),
-                            assignee=normalized_assignee or "",
-                            updated_at=int(time.time() * 1000),
+                else:
+                    generation_payload: Any = full_prompt
+                    if whiteboard_image_part:
+                        generation_payload = [full_prompt, whiteboard_image_part]
+                    try:
+                        response = await reply_model.generate_content_async(generation_payload)
+                    except Exception as multimodal_error:
+                        if not whiteboard_image_part:
+                            raise
+                        logger.warning(
+                            "Primary chat model could not use whiteboard image, retrying with vision model: "
+                            f"{multimodal_error}"
                         )
-                        await update_task(chat.room_id, task_data["id"], task)
-                    else:
-                        # Create new task
-                        task = Task(
-                            title=str(task_data.get("title") or "Untitled Task"),
-                            description=str(task_data.get("description") or ""),
-                            column=str(task_data.get("column") or "Backlog"),
-                            assignee=normalized_assignee or "",
-                            created_at=int(time.time() * 1000),
+                        _, whiteboard_reply_model = _create_whiteboard_models()
+                        response = await whiteboard_reply_model.generate_content_async(
+                            generation_payload
                         )
-                        await create_task(chat.room_id, task)
+                        ai_model_used = WHITEBOARD_VISION_MODEL
+                    response_text = response.text
 
-            # 2. Handle Roadmap Update
-            if result and "roadmap" in result and isinstance(result["roadmap"], dict):
-                await update_roadmap(chat.room_id, {"roadmap": json.dumps(result["roadmap"])})
+                result = _extract_json_object(response_text)
+                if result and "tasks" in result and isinstance(result["tasks"], list):
+                    member_names_for_assignment = [
+                        str(member.get("name", "")).strip()
+                        for member in room_members
+                        if str(member.get("name", "")).strip()
+                    ]
+                    for task_data in result["tasks"]:
+                        normalized_assignee = _normalize_assignee_name(
+                            task_data.get("assignee"), member_names_for_assignment
+                        )
+                        if "id" in task_data:
+                            task = Task(
+                                title=str(task_data.get("title") or "Untitled Task"),
+                                description=str(task_data.get("description") or ""),
+                                column=str(task_data.get("column") or "Backlog"),
+                                assignee=normalized_assignee or "",
+                                updated_at=int(time.time() * 1000),
+                            )
+                            await update_task(chat.room_id, task_data["id"], task)
+                        else:
+                            task = Task(
+                                title=str(task_data.get("title") or "Untitled Task"),
+                                description=str(task_data.get("description") or ""),
+                                column=str(task_data.get("column") or "Backlog"),
+                                assignee=normalized_assignee or "",
+                                created_at=int(time.time() * 1000),
+                            )
+                            await create_task(chat.room_id, task)
 
-            # 3. Handle Reply
-            ai_reply = result.get("reply") if result and isinstance(result, dict) else None
-            if not ai_reply:
-                ai_reply = _strip_markdown_code_fences(response.text)
-            if not ai_reply:
-                ai_reply = "I'm not sure how to answer that, could you rephrase?"
-            ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
-    except Exception as e:
-        logger.warning(f"AI error: {e}")
-        ai_reply = (
-            "I'm having trouble answering that right now, could you please rephrase?"
+                if result and "roadmap" in result and isinstance(result["roadmap"], dict):
+                    await update_roadmap(
+                        chat.room_id, {"roadmap": json.dumps(result["roadmap"])}
+                    )
+
+                ai_reply = (
+                    result.get("reply")
+                    if result and isinstance(result, dict)
+                    else None
+                )
+                if not ai_reply:
+                    ai_reply = _strip_markdown_code_fences(response_text)
+                if not ai_reply:
+                    ai_reply = "I'm not sure how to answer that, could you rephrase?"
+                ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
+        except Exception as error:
+            logger.warning(f"AI error: {error}")
+            ai_reply = (
+                "I'm having trouble answering that right now, could you please rephrase?"
+            )
+
+        if not ai_reply:
+            ai_reply = _safe_chat_fallback(chat.message, task_title)
+        ai_object_id = ObjectId() if db_connected else None
+        ai_message_id = (
+            str(ai_object_id) if ai_object_id else f"temp_ai_{int(time.time() * 1000)}"
         )
-
-    if not ai_reply:
-        ai_reply = _safe_chat_fallback(chat.message, task_title)
-    ai_object_id = ObjectId() if db_connected else None
-    ai_message_id = (
-        str(ai_object_id) if ai_object_id else f"temp_ai_{int(time.time() * 1000)}"
-    )
-    ai_message_dict: Dict[str, Any] = {
-        "id": ai_message_id,
-        "room_id": chat.room_id,
-        "sender": "HackBuddy AI",
-        "message": "",
-        "timestamp": datetime.now().isoformat(),
-        "model": ai_model_used if "ai_model_used" in locals() else selected_model,
-    }
-
-    await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": False})
-
-    streamed_message = ""
-    for chunk in _chunk_chat_reply(ai_reply):
-        streamed_message += chunk
-        await manager.broadcast(
-            chat.room_id,
-            {
-                "type": "CHAT_MESSAGE",
-                "message": {
-                    **ai_message_dict,
-                    "message": streamed_message,
-                    "is_streaming": True,
-                },
-            },
-        )
-        await asyncio.sleep(0.035)
-
-    final_ai_message: Dict[str, Any] = {
-        **ai_message_dict,
-        "message": ai_reply,
-        "is_streaming": False,
-    }
-
-    if db_connected and ai_object_id is not None:
-        db_ai_message = {
-            "_id": ai_object_id,
+        ai_message_dict: Dict[str, Any] = {
+            "id": ai_message_id,
             "room_id": chat.room_id,
             "sender": "HackBuddy AI",
-            "message": ai_reply,
-            "timestamp": final_ai_message["timestamp"],
-            "model": final_ai_message["model"],
+            "message": "",
+            "timestamp": datetime.now().isoformat(),
+            "model": ai_model_used if "ai_model_used" in locals() else selected_model,
         }
-        await db.chat_messages.insert_one(db_ai_message)
 
-    await manager.broadcast(
-        chat.room_id, {"type": "CHAT_MESSAGE", "message": final_ai_message}
-    )
-    return {"ok": True, "saved": db_connected, "model": final_ai_message["model"]}
+        streamed_message = ""
+        for chunk in _chunk_chat_reply(ai_reply):
+            streamed_message += chunk
+            await manager.broadcast(
+                chat.room_id,
+                {
+                    "type": "CHAT_MESSAGE",
+                    "message": {
+                        **ai_message_dict,
+                        "message": streamed_message,
+                        "is_streaming": True,
+                    },
+                },
+            )
+            await asyncio.sleep(0.035)
+
+        final_ai_message: Dict[str, Any] = {
+            **ai_message_dict,
+            "message": ai_reply,
+            "is_streaming": False,
+        }
+
+        if db_connected and ai_object_id is not None:
+            db_ai_message = {
+                "_id": ai_object_id,
+                "room_id": chat.room_id,
+                "sender": "HackBuddy AI",
+                "message": ai_reply,
+                "timestamp": final_ai_message["timestamp"],
+                "model": final_ai_message["model"],
+            }
+            await db.chat_messages.insert_one(db_ai_message)
+
+        await manager.broadcast(
+            chat.room_id, {"type": "CHAT_MESSAGE", "message": final_ai_message}
+        )
+        return {"ok": True, "saved": db_connected, "model": final_ai_message["model"]}
+    finally:
+        if thinking_started:
+            await manager.broadcast(chat.room_id, {"type": "CHAT_THINKING", "status": False})
+        await _release_ai_room_request_slot(chat.room_id)
 
 @app.post("/api/profile/upsert")
 async def upsert_profile(payload: UserProfilePayload):
@@ -2609,10 +2829,28 @@ async def get_board(room_id: str):
 
 @app.put("/api/roadmap/{room_id}")
 async def update_roadmap(room_id: str, data: dict):
+    roadmap = data.get("roadmap", "")
     if await is_db_connected():
-        roadmap = data.get("roadmap", "")
         await db.boards.update_one({"room_id": room_id}, {"$set": {"roadmap": roadmap}})
+        await manager.broadcast(
+            room_id,
+            {
+                "type": "ROADMAP_UPDATED",
+                "room_id": room_id,
+                "roadmap": roadmap,
+                "timestamp": datetime.now().isoformat(),
+            },
+        )
         return {"ok": True}
+    await manager.broadcast(
+        room_id,
+        {
+            "type": "ROADMAP_UPDATED",
+            "room_id": room_id,
+            "roadmap": roadmap,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
     return {"ok": False}
 
 

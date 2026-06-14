@@ -7,11 +7,11 @@ import { CSS } from "@dnd-kit/utilities";
 import { useDroppable } from "@dnd-kit/core";
 import { ChatWindow } from "../components/ChatWindow";
 import { useBoardWebSocket } from "../hooks/useBoardWebSocket";
+import { AI_CONFIG_UPDATED_EVENT, DEFAULT_CHAT_MODELS, getAiHeaders } from "../aiConfig";
 
 const COL_COLOR: Record<string, string> = { Backlog: "#71717a", "In Progress": "#f59e0b", Done: "#22c55e" };
 const CHAT_MODEL_STORAGE_KEY = "hackpilot_chat_model";
-const FALLBACK_CHAT_MODELS = ["gemma-4-31b-it", "gemini-2.5-flash", "gemini-2.5-pro"];
-const FALLBACK_DEFAULT_CHAT_MODEL = FALLBACK_CHAT_MODELS[0];
+const FALLBACK_DEFAULT_CHAT_MODEL = DEFAULT_CHAT_MODELS[0];
 
 const isClearChatCommand = (value: string) => {
   const command = value.trim().toLowerCase().split(/\s+/)[0];
@@ -64,10 +64,11 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
     () => localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || FALLBACK_DEFAULT_CHAT_MODEL,
   );
   const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>(
-    FALLBACK_CHAT_MODELS.map((modelName) => ({ value: modelName, label: formatModelLabel(modelName) })),
+    DEFAULT_CHAT_MODELS.map((modelName) => ({ value: modelName, label: formatModelLabel(modelName) })),
   );
   const [selectedVisionText, setSelectedVisionText] = useState("");
   const visionPreviewRef = useRef<HTMLDivElement>(null);
+  const chatSendInFlightRef = useRef(false);
 
   const mergeChatMessages = useCallback((currentMessages: ChatMessage[], incomingMessages: ChatMessage[]) => {
     const nextMessages = [...currentMessages];
@@ -104,7 +105,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   }, [mergeChatMessages]);
 
   const handleSocketMessage = useCallback((payload: unknown) => {
-    const event = payload as { type?: string; message?: ChatMessage; status?: boolean };
+    const event = payload as { type?: string; message?: ChatMessage; status?: boolean; roadmap?: string };
     if (event.type === "CHAT_CLEARED") {
       setChatMessages([]);
       setIsAiThinking(false);
@@ -117,8 +118,51 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
     }
     if (event.type === "CHAT_THINKING") {
       setIsAiThinking(Boolean(event.status));
+      return;
     }
-  }, [toast, upsertChatMessage]);
+    if (event.type === "ROADMAP_UPDATED") {
+      const refreshRoadmapFromServer = () => {
+        void apiFetch<{ roadmap: string; tasks: Task[] }>(`/api/board/${roomCode}`)
+          .then((data) => {
+            try {
+              const parsedRoadmap = data.roadmap ? JSON.parse(data.roadmap) : { vision: "", phases: {} };
+              setRoadmap({
+                vision: typeof parsedRoadmap.vision === "string" ? parsedRoadmap.vision : "",
+                phases:
+                  parsedRoadmap.phases && typeof parsedRoadmap.phases === "object"
+                    ? parsedRoadmap.phases
+                    : {},
+              });
+            } catch {
+              // Ignore malformed roadmap updates.
+            }
+            setTasks(data.tasks || []);
+          })
+          .catch(() => {});
+      };
+      const rawRoadmap = typeof event.roadmap === "string" ? event.roadmap : "";
+      if (!rawRoadmap) {
+        refreshRoadmapFromServer();
+        return;
+      }
+      try {
+        const parsedRoadmap = JSON.parse(rawRoadmap) as { vision: string; phases: Record<string, string[]> };
+        if (parsedRoadmap && typeof parsedRoadmap === "object") {
+          setRoadmap({
+            vision: typeof parsedRoadmap.vision === "string" ? parsedRoadmap.vision : "",
+            phases:
+              parsedRoadmap.phases && typeof parsedRoadmap.phases === "object"
+                ? parsedRoadmap.phases
+                : {},
+          });
+          return;
+        }
+      } catch {
+        // Fallback below.
+      }
+      refreshRoadmapFromServer();
+    }
+  }, [roomCode, toast, upsertChatMessage]);
 
   useBoardWebSocket(roomCode, handleSocketMessage);
 
@@ -148,7 +192,9 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
 
   const fetchChatModels = useCallback(async () => {
     try {
-      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`);
+      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`, {
+        headers: getAiHeaders(),
+      });
       const modelNames = (data.models || []).filter((modelName) => modelName.trim().length > 0);
       if (modelNames.length === 0) return;
       const options = modelNames.map((modelName) => ({ value: modelName, label: formatModelLabel(modelName) }));
@@ -190,6 +236,13 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
       fetchChatModels().catch(() => {});
     }, 0);
     return () => window.clearTimeout(timer);
+  }, [fetchChatModels]);
+  useEffect(() => {
+    const handleAiConfigUpdated = () => {
+      fetchChatModels().catch(() => {});
+    };
+    window.addEventListener(AI_CONFIG_UPDATED_EVENT, handleAiConfigUpdated);
+    return () => window.removeEventListener(AI_CONFIG_UPDATED_EVENT, handleAiConfigUpdated);
   }, [fetchChatModels]);
 
   useEffect(() => {
@@ -292,6 +345,10 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   const handleSendMessage = async (text: string) => {
     const message = text.trim();
     if (!message) return;
+    if (isAiThinking || chatSendInFlightRef.current) {
+      toast("Only one AI message at a time — wait for the current response to finish.", "warn");
+      return;
+    }
     if (isClearChatCommand(message)) {
       try {
         const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(
@@ -314,10 +371,11 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
       timestamp: new Date().toISOString(),
       client_nonce: clientNonce,
     });
+    chatSendInFlightRef.current = true;
     try {
       const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
-        headers: { "X-Gemini-Model": selectedModel },
+        headers: { "X-Gemini-Model": selectedModel, ...getAiHeaders() },
         body: JSON.stringify({
           room_id: roomCode,
           sender: "You",
@@ -330,10 +388,17 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
       if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
       }
-    } catch {
+    } catch (error) {
       setChatMessages((currentMessages) => currentMessages.filter((entry) => entry.client_nonce !== clientNonce));
       setIsAiThinking(false);
-      toast("Failed to send chat message.", "warn");
+      const messageText = error instanceof Error ? error.message : "";
+      if (messageText) {
+        toast(messageText, "warn");
+      } else {
+        toast("Failed to send chat message.", "warn");
+      }
+    } finally {
+      chatSendInFlightRef.current = false;
     }
   };
 

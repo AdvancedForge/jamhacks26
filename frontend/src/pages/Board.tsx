@@ -17,9 +17,9 @@ import type { Task, ToastFn, ChatMessage } from "../hackbuddyTypes";
 import { COLUMNS, Column, DragTaskCardPreview, type CreateTaskInput, TaskDrawer } from "../components/BoardUI";
 import { ChatWindow } from "../components/ChatWindow";
 import { useBoardWebSocket } from "../hooks/useBoardWebSocket";
+import { AI_CONFIG_UPDATED_EVENT, DEFAULT_CHAT_MODELS, getAiHeaders } from "../aiConfig";
 const CHAT_MODEL_STORAGE_KEY = "hackpilot_chat_model";
-const FALLBACK_CHAT_MODELS = ["gemma-4-31b-it", "gemini-2.5-flash", "gemini-2.5-pro"];
-const FALLBACK_DEFAULT_CHAT_MODEL = FALLBACK_CHAT_MODELS[0];
+const FALLBACK_DEFAULT_CHAT_MODEL = DEFAULT_CHAT_MODELS[0];
 const isClearChatCommand = (value: string) => {
   const command = value.trim().toLowerCase().split(/\s+/)[0];
   return command === "/clear" || command === "/clear-chat" || command === "/clearchat";
@@ -62,7 +62,7 @@ export default function BoardPage({
     () => localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || FALLBACK_DEFAULT_CHAT_MODEL,
   );
   const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>(
-    FALLBACK_CHAT_MODELS.map((modelName) => ({
+    DEFAULT_CHAT_MODELS.map((modelName) => ({
       value: modelName,
       label: formatModelLabel(modelName),
     })),
@@ -77,6 +77,7 @@ export default function BoardPage({
   const dragOverRafRef = useRef<number | null>(null);
   const pendingDragOverRef = useRef<{ activeId: string; overId: string; overColumn?: string } | null>(null);
   const lastDragOverSignatureRef = useRef<string | null>(null);
+  const chatSendInFlightRef = useRef(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
   const collisionDetection: CollisionDetection = useCallback((args) => {
     const pointerCollisions = pointerWithin(args);
@@ -177,7 +178,9 @@ export default function BoardPage({
 
   const fetchChatModels = useCallback(async () => {
     try {
-      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`);
+      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`, {
+        headers: getAiHeaders(),
+      });
       const modelNames = (data.models || []).filter((modelName) => modelName.trim().length > 0);
       if (modelNames.length === 0) return;
       const options = modelNames.map((modelName) => ({
@@ -214,6 +217,13 @@ export default function BoardPage({
       fetchChatModels().catch(() => {});
     }, 0);
     return () => window.clearTimeout(timer);
+  }, [fetchChatModels]);
+  useEffect(() => {
+    const handleAiConfigUpdated = () => {
+      fetchChatModels().catch(() => {});
+    };
+    window.addEventListener(AI_CONFIG_UPDATED_EVENT, handleAiConfigUpdated);
+    return () => window.removeEventListener(AI_CONFIG_UPDATED_EVENT, handleAiConfigUpdated);
   }, [fetchChatModels]);
 
   useEffect(() => {
@@ -467,6 +477,10 @@ export default function BoardPage({
   const handleSendMessage = async (text: string) => {
     const message = text.trim();
     if (!message) return;
+    if (isAiThinking || chatSendInFlightRef.current) {
+      toast("Only one AI message at a time — wait for the current response to finish.", "warn");
+      return;
+    }
     if (isClearChatCommand(message)) {
       try {
         const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(
@@ -488,10 +502,11 @@ export default function BoardPage({
       timestamp: new Date().toISOString(),
       client_nonce: clientNonce,
     });
+    chatSendInFlightRef.current = true;
     try {
       const response = await apiFetch<{ ok?: boolean; saved?: boolean }>(`/api/chat/message`, {
         method: "POST",
-        headers: { "X-Gemini-Model": selectedModel },
+        headers: { "X-Gemini-Model": selectedModel, ...getAiHeaders() },
         body: JSON.stringify({
           room_id: roomCode,
           sender: currentUserName?.trim() || "You",
@@ -503,10 +518,17 @@ export default function BoardPage({
       if (response.ok === false || response.saved === false) {
         toast("Chat was queued locally; backend did not persist it.", "warn");
       }
-    } catch {
+    } catch (error) {
       setChatMessages((currentMessages) => currentMessages.filter((entry) => entry.client_nonce !== clientNonce));
       setIsAiThinking(false);
-      toast("Failed to send chat message.", "warn");
+      const messageText = error instanceof Error ? error.message : "";
+      if (messageText) {
+        toast(messageText, "warn");
+      } else {
+        toast("Failed to send chat message.", "warn");
+      }
+    } finally {
+      chatSendInFlightRef.current = false;
     }
   };
   useEffect(() => {
