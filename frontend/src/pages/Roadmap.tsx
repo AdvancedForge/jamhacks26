@@ -39,12 +39,20 @@ const normalizeRoadmap = (value: unknown): RoadmapDocument => {
         ? rawRoadmap.vision
         : "";
   const phasesCandidate = rawRoadmap.phases;
+  const phases: Record<string, string[]> = {};
+  if (phasesCandidate && typeof phasesCandidate === "object" && !Array.isArray(phasesCandidate)) {
+    for (const [key, value] of Object.entries(phasesCandidate)) {
+      if (Array.isArray(value)) {
+        phases[key] = value as string[];
+      } else {
+        phases[key] = [];
+      }
+    }
+  }
+
   return {
     projectReadme: projectReadmeCandidate,
-    phases:
-      phasesCandidate && typeof phasesCandidate === "object" && !Array.isArray(phasesCandidate)
-        ? (phasesCandidate as Record<string, string[]>)
-        : {},
+    phases,
   };
 };
 

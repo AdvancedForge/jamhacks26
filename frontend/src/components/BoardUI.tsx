@@ -189,6 +189,9 @@ export function Column({
     data: { type: "column", column: col },
   });
 
+  const safeTasks = Array.isArray(tasks) ? tasks : [];
+  const safeMemberNames = Array.isArray(memberNames) ? memberNames : [];
+
   return (
     <div
       className={`flex flex-col bg-[#0f1012]/60 backdrop-blur-sm border rounded-2xl w-[300px] shrink-0 transition-all ${
@@ -204,12 +207,12 @@ export function Column({
           }}
         />
         <span className="text-[14px] font-medium text-white flex-1">{col}</span>
-        <span className="text-[11px] text-[#52525b] bg-white/[0.04] rounded-full px-2.5 py-1 font-medium">{tasks.length}</span>
+        <span className="text-[11px] text-[#52525b] bg-white/[0.04] rounded-full px-2.5 py-1 font-medium">{safeTasks.length}</span>
       </div>
 
       <div ref={setNodeRef} className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2.5 min-h-0">
-        <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
-          {tasks.length === 0 && !adding ? (
+        <SortableContext items={safeTasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
+          {safeTasks.length === 0 && !adding ? (
             isOver && activeTaskId ? (
               <DropSkeletonCard />
             ) : (
@@ -218,7 +221,7 @@ export function Column({
               </div>
             )
           ) : null}
-          {tasks.map((task) => (
+          {safeTasks.map((task) => (
             <Card key={task.id} task={task} onClick={() => onOpen(task)} isDropPlaceholder={activeTaskId === task.id} />
           ))}
         </SortableContext>
@@ -228,7 +231,7 @@ export function Column({
         {adding ? (
           <InlineForm
             column={col}
-            memberNames={memberNames}
+            memberNames={safeMemberNames}
             onAdd={(data) => {
               onAdd(data);
               setAdding(false);
