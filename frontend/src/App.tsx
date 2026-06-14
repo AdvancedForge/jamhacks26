@@ -311,6 +311,17 @@ export default function App() {
     setWalkthroughStepIndex(0);
   }, [showDashboardWalkthrough]);
   useEffect(() => {
+    if (!showDashboardWalkthrough) return;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    const previousBodyOverflow = document.body.style.overflow;
+    document.documentElement.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.documentElement.style.overflow = previousDocumentOverflow;
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, [showDashboardWalkthrough]);
+  useEffect(() => {
     if (!showDashboardWalkthrough || !activeWalkthroughStep?.page) return;
     if (page === activeWalkthroughStep.page) return;
     setPage(activeWalkthroughStep.page);
@@ -360,11 +371,17 @@ export default function App() {
       }
       const rect = targetElement.getBoundingClientRect();
       const padding = activeWalkthroughStep.padding ?? (activeWalkthroughStep.target === "main" ? 10 : 6);
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const clampedLeft = Math.max(8, rect.left - padding);
+      const clampedTop = Math.max(8, rect.top - padding);
+      const clampedRight = Math.min(viewportWidth - 8, rect.right + padding);
+      const clampedBottom = Math.min(viewportHeight - 8, rect.bottom + padding);
       const nextRect = {
-        top: Math.max(8, rect.top - padding),
-        left: Math.max(8, rect.left - padding),
-        width: Math.max(0, rect.width + padding * 2),
-        height: Math.max(0, rect.height + padding * 2),
+        top: clampedTop,
+        left: clampedLeft,
+        width: Math.max(0, clampedRight - clampedLeft),
+        height: Math.max(0, clampedBottom - clampedTop),
       };
       setSpotlightRect((currentRect) => {
         if (!currentRect) return nextRect;
@@ -423,7 +440,7 @@ export default function App() {
 
   if (!roomCode && isTeammakingView && profile) {
     return (
-      <div className="h-screen bg-[#08090a] overflow-hidden">
+      <div className="h-screen bg-[#08090a] overflow-y-auto">
         <MatchingPage profile={profile} authToken={authToken} toast={toast} onTeamReady={(nextRoomCode) => handleEnterRoom(nextRoomCode, profile.name)} />
         <ToastList toasts={toasts} />
       </div>
@@ -479,15 +496,32 @@ export default function App() {
         {page === "Roadmap" && <RoadmapPage roomCode={roomCode} toast={toast} />}
       </main>
       {showDashboardWalkthrough && spotlightRect && activeWalkthroughStep && (
-        <div className="absolute inset-0 z-[70] pointer-events-none">
+        <div className="fixed inset-0 z-[70] pointer-events-none overflow-hidden">
+          <div className="absolute bg-black/80" style={{ top: 0, left: 0, right: 0, height: spotlightRect.top }} />
           <div
-            className="absolute rounded-xl border border-white/25 transition-all duration-200"
+            className="absolute bg-black/80"
+            style={{ top: spotlightRect.top + spotlightRect.height, left: 0, right: 0, bottom: 0 }}
+          />
+          <div
+            className="absolute bg-black/80"
+            style={{ top: spotlightRect.top, left: 0, width: spotlightRect.left, height: spotlightRect.height }}
+          />
+          <div
+            className="absolute bg-black/80"
+            style={{
+              top: spotlightRect.top,
+              left: spotlightRect.left + spotlightRect.width,
+              right: 0,
+              height: spotlightRect.height,
+            }}
+          />
+          <div
+            className="absolute rounded-xl border border-white/25 transition-all duration-200 pointer-events-none"
             style={{
               top: spotlightRect.top,
               left: spotlightRect.left,
               width: spotlightRect.width,
               height: spotlightRect.height,
-              boxShadow: "0 0 0 9999px rgba(2, 2, 6, 0.8)",
             }}
           />
           <div
