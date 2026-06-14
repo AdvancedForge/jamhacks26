@@ -204,7 +204,7 @@ export default function MatchingPage({
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 bg-[#08090a]">
+    <div className="flex-1 min-h-screen overflow-y-auto p-8 bg-[#08090a] text-white">
       <div className="max-w-3xl mx-auto flex flex-col gap-6">
         <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
           <h2 className="text-[20px] font-semibold text-white">Teammaking</h2>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import type { AppPage } from "../hackbuddyTypes";
 
 const NAV: AppPage[] = ["Roadmap", "Kanban", "Whiteboard", "Integrations"];
@@ -9,12 +10,14 @@ export default function Topbar({
   onNav,
   polledAt,
   onLogout,
+  navRef,
 }: {
   roomCode: string;
   page: AppPage;
   onNav: (page: AppPage) => void;
   polledAt: number;
   onLogout: () => void;
+  navRef?: RefObject<HTMLElement | null>;
 }) {
   const [secAgo, setSecAgo] = useState(0);
   const lastPollAtRef = useRef(0);
@@ -44,7 +47,7 @@ export default function Topbar({
         <span className="text-white text-[15px] font-semibold tracking-tight hidden sm:block">HackBuddy</span>
       </div>
 
-      <nav className="flex gap-1 bg-white/2 border border-white/4 rounded-lg p-1">
+      <nav ref={navRef} className="flex gap-1 bg-white/2 border border-white/4 rounded-lg p-1">
         {NAV.map((nav) => (
           <button
             key={nav}
