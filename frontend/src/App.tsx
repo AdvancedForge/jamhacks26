@@ -142,6 +142,20 @@ export default function App() {
     setPage(newPage);
     localStorage.setItem(PAGE_STORAGE_KEY, newPage);
   };
+  const handleLogout = () => {
+    setAuthToken("");
+    setAuthUser(null);
+    setProfile(null);
+    setRoomCode("");
+    setDisplayName("You");
+    setPage("Kanban");
+    localStorage.removeItem("hb_auth_token");
+    localStorage.removeItem("hb_auth_user");
+    localStorage.removeItem(PROFILE_STORAGE_KEY);
+    localStorage.removeItem(ROOM_STORAGE_KEY);
+    localStorage.removeItem(DISPLAY_NAME_STORAGE_KEY);
+    localStorage.removeItem(PAGE_STORAGE_KEY);
+  };
 
 
   useEffect(() => {
@@ -211,7 +225,7 @@ export default function App() {
         .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
       `}</style>
 
-      <Topbar roomCode={roomCode} page={page} onNav={handleNav} polledAt={polledAt} />
+      <Topbar roomCode={roomCode} page={page} onNav={handleNav} polledAt={polledAt} onLogout={handleLogout} />
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
         {page === "Kanban" && (

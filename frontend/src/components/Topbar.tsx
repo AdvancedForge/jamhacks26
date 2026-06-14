@@ -8,11 +8,13 @@ export default function Topbar({
   page,
   onNav,
   polledAt,
+  onLogout,
 }: {
   roomCode: string;
   page: AppPage;
   onNav: (page: AppPage) => void;
   polledAt: number;
+  onLogout: () => void;
 }) {
   const [secAgo, setSecAgo] = useState(0);
   const lastPollAtRef = useRef(0);
@@ -68,6 +70,12 @@ export default function Topbar({
         <div className="font-mono text-[12px] text-[#71717a] bg-white/3 border border-white/6 rounded-lg px-3 py-1.5 tracking-wide">
           {roomCode}
         </div>
+        <button
+          onClick={onLogout}
+          className="text-[12px] font-medium text-[#d4d4d8] border border-white/10 rounded-lg px-3 py-1.5 hover:bg-white/5"
+        >
+          Log out
+        </button>
       </div>
     </header>
   );
