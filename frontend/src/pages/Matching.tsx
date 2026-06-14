@@ -8,6 +8,10 @@ type TeammatePreview = {
   interest: string;
   vibe: string;
   discord_username?: string;
+  team_id?: string | null;
+  member_usernames?: string[];
+  invitee_username?: string;
+  is_team?: boolean;
 };
 
 type IncomingInvite = {
@@ -53,6 +57,10 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
     merged.push(value);
   });
   return merged;
+}
+
+function inviteRequestKey(inviteeUsername: string, inviteeTeamId?: string | null): string {
+  return `${inviteeUsername.trim().toLowerCase()}::${(inviteeTeamId || "solo").trim().toLowerCase()}`;
 }
 
 export default function MatchingPage({
@@ -157,19 +165,22 @@ export default function MatchingPage({
     };
   }, [fetchStatus, toast]);
 
-  const inviteCandidate = async (candidateUsername: string) => {
-    const normalizedCandidateUsername = candidateUsername.trim();
+  const inviteCandidate = async (target: { inviteeUsername: string; inviteeTeamId?: string | null }) => {
+    const normalizedCandidateUsername = target.inviteeUsername.trim();
+    const normalizedTargetTeamId = (target.inviteeTeamId || "").trim() || null;
     if (!normalizedCandidateUsername) {
       toast("Enter a username to invite.", "warn");
       return false;
     }
-    setLoadingInviteId(normalizedCandidateUsername);
+    const requestKey = inviteRequestKey(normalizedCandidateUsername, normalizedTargetTeamId);
+    setLoadingInviteId(requestKey);
     try {
       const response = await apiFetch<{ already_pending?: boolean }>("/api/matchmaking/invite", {
         method: "POST",
         headers: { "X-Auth-Token": authToken },
         body: JSON.stringify({
           invitee_username: normalizedCandidateUsername,
+          invitee_team_id: normalizedTargetTeamId,
         }),
       });
       toast(response.already_pending ? "Invite already pending." : "Invite sent.", "success");
@@ -184,7 +195,7 @@ export default function MatchingPage({
   };
 
   const inviteByUsername = async () => {
-    const invited = await inviteCandidate(inviteUsernameInput);
+    const invited = await inviteCandidate({ inviteeUsername: inviteUsernameInput });
     if (invited) setInviteUsernameInput("");
   };
 
@@ -277,20 +288,9 @@ export default function MatchingPage({
           </p>
           {(status.room_id || status.invite_code) && (
             <div className="mt-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3">
-              {status.room_id ? (
-                <>
-                  <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Team room code</p>
-                  <p className="text-[16px] text-white font-mono mt-1">{status.room_id}</p>
-                  <p className="text-[12px] text-[#71717a] mt-1">Use this to join the normal room when your team is ready.</p>
-                </>
-              ) : null}
-              {status.invite_code ? (
-                <>
-                  <p className="text-[12px] uppercase tracking-wide text-[#52525b] mt-3">Team invite code</p>
-                  <p className="text-[16px] text-white font-mono mt-1">{status.invite_code}</p>
-                  <p className="text-[12px] text-[#71717a] mt-1">Share this with anyone using Join Team.</p>
-                </>
-              ) : null}
+              <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Team code (same as room code)</p>
+              <p className="text-[16px] text-white font-mono mt-1">{status.room_id || status.invite_code}</p>
+              <p className="text-[12px] text-[#71717a] mt-1">Share this code for Join Team and for entering the room.</p>
             </div>
           )}
           <div className="mt-4 flex flex-wrap gap-3">
@@ -321,7 +321,7 @@ export default function MatchingPage({
                 <input
                   value={inviteCodeInput}
                   onChange={(event) => setInviteCodeInput(event.target.value)}
-                  placeholder="Enter team code"
+                  placeholder="Enter team / room code"
                   className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
                 />
                 <button
@@ -345,7 +345,7 @@ export default function MatchingPage({
                 />
                 <button
                   onClick={() => void inviteByUsername()}
-                  disabled={loadingInviteId === inviteUsernameInput.trim()}
+                  disabled={loadingInviteId === inviteRequestKey(inviteUsernameInput)}
                   className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
                 >
                   Invite
@@ -417,9 +417,9 @@ export default function MatchingPage({
         )}
 
         {(status.outgoing_invites || []).length > 0 && (
-          <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+          <section className="self-start w-fit max-w-full bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-4">
             <h3 className="text-[16px] text-white font-medium">Pending Outgoing Invites</h3>
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-3 flex flex-wrap gap-2 max-w-[560px]">
               {(status.outgoing_invites || []).map((invite) => (
                 <span key={invite.invite_id} className="text-[13px] text-[#d4d4d8] bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2">
                   {invite.to_username}
@@ -435,24 +435,41 @@ export default function MatchingPage({
             <p className="text-[14px] text-[#71717a] mt-3">No candidates available right now.</p>
           ) : (
             <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {(status.candidates || []).map((candidate) => (
-                <article key={candidate.username} className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4">
-                  <p className="text-white text-[15px]">{candidate.username}</p>
-                  <p className="text-[13px] text-[#d4d4d8] mt-1">Skills: {candidate.skills.join(", ") || "N/A"}</p>
-                  <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {candidate.interest || "N/A"}</p>
-                  <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {candidate.vibe || "N/A"}</p>
-                  {candidate.discord_username ? (
-                    <p className="text-[13px] text-[#d4d4d8] mt-1">Discord: {candidate.discord_username}</p>
-                  ) : null}
-                  <button
-                    onClick={() => void inviteCandidate(candidate.username)}
-                    disabled={loadingInviteId === candidate.username}
-                    className="mt-3 bg-white text-[#09090b] text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+              {(status.candidates || []).map((candidate) => {
+                const memberNames = uniqueNonEmpty(
+                  candidate.member_usernames && candidate.member_usernames.length > 0
+                    ? candidate.member_usernames
+                    : [candidate.username],
+                );
+                const inviteeUsername = candidate.invitee_username || candidate.username;
+                const inviteeTeamId = candidate.team_id || null;
+                const requestKey = inviteRequestKey(inviteeUsername, inviteeTeamId);
+                const isGroupedTeam = Boolean(candidate.is_team || memberNames.length > 1);
+                return (
+                  <article
+                    key={`${candidate.team_id || "solo"}:${inviteeUsername}`}
+                    className="border border-white/[0.06] bg-white/[0.02] rounded-xl p-4"
                   >
-                    Invite to Collaborate
-                  </button>
-                </article>
-              ))}
+                    <p className="text-white text-[15px]">{memberNames.join(", ")}</p>
+                    {isGroupedTeam ? (
+                      <p className="text-[12px] text-[#a1a1aa] mt-1">This invite requests to join this team.</p>
+                    ) : null}
+                    <p className="text-[13px] text-[#d4d4d8] mt-2">Skills: {candidate.skills.join(", ") || "N/A"}</p>
+                    <p className="text-[13px] text-[#d4d4d8] mt-1">Interest: {candidate.interest || "N/A"}</p>
+                    <p className="text-[13px] text-[#d4d4d8] mt-1">Vibe: {candidate.vibe || "N/A"}</p>
+                    {candidate.discord_username ? (
+                      <p className="text-[13px] text-[#d4d4d8] mt-1">Discord: {candidate.discord_username}</p>
+                    ) : null}
+                    <button
+                      onClick={() => void inviteCandidate({ inviteeUsername, inviteeTeamId })}
+                      disabled={loadingInviteId === requestKey}
+                      className="mt-3 bg-white text-[#09090b] text-[13px] px-4 py-2 rounded-lg disabled:opacity-50"
+                    >
+                      {isGroupedTeam ? "Request to Join Team" : "Invite to Collaborate"}
+                    </button>
+                  </article>
+                );
+              })}
             </div>
           )}
         </section>

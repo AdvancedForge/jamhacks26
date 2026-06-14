@@ -119,6 +119,7 @@ class MatchmakingEnrollPayload(BaseModel):
 
 class MatchmakingInvitePayload(BaseModel):
     invitee_username: str
+    invitee_team_id: Optional[str] = None
 
 
 class MatchmakingInviteDecisionPayload(BaseModel):
@@ -650,18 +651,20 @@ async def _ensure_team_for_user(user: Dict[str, Any]) -> Dict[str, Any]:
         member_names = _normalize_member_names(existing_team.get("member_names", []))
         if username not in member_names:
             member_names.append(username)
-        invite_code = str(existing_team.get("invite_code") or "").strip().upper() or _new_team_invite_code()
+        room_id = await _ensure_team_room(existing_team)
         updated_team = {
             **existing_team,
             "member_names": member_names,
-            "invite_code": invite_code,
+            "room_id": room_id,
+            "invite_code": room_id,
         }
         await db.teams.update_one(
             {"team_id": existing_team.get("team_id")},
             {
                 "$set": {
                     "member_names": member_names,
-                    "invite_code": invite_code,
+                    "room_id": room_id,
+                    "invite_code": room_id,
                     "updated_at": int(time.time() * 1000),
                 }
             },
@@ -673,23 +676,26 @@ async def _ensure_team_for_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "team_id": _new_team_id(),
         "hackathon_id": _normalize_hackathon_id(user.get("hackathon_id") or "default"),
         "member_names": [username],
-        "invite_code": _new_team_invite_code(),
+        "invite_code": None,
         "room_id": None,
         "status": "forming",
         "created_at": int(time.time() * 1000),
         "updated_at": int(time.time() * 1000),
     }
     await db.teams.insert_one(team_doc)
+    room_id = await _ensure_team_room(team_doc)
     await db.users.update_one(
         {"username": username},
         {
             "$set": {
                 "team_id": team_doc["team_id"],
-                "invite_code": team_doc["invite_code"],
+                "invite_code": room_id,
                 "updated_at": int(time.time() * 1000),
             }
         },
     )
+    team_doc["room_id"] = room_id
+    team_doc["invite_code"] = room_id
     return team_doc
 
 
@@ -735,6 +741,7 @@ async def _ensure_team_room(team_doc: Dict[str, Any]) -> str:
         {
             "$set": {
                 "room_id": room_id,
+                "invite_code": room_id,
                 "updated_at": int(time.time() * 1000),
             }
         },
@@ -1638,7 +1645,7 @@ def _serialize_auth_user(
         "discord_username": user.get("discord_username", ""),
         "room_id": user.get("room_id"),
         "team_id": user.get("team_id"),
-        "invite_code": user.get("invite_code") or (team or {}).get("invite_code"),
+        "invite_code": user.get("invite_code") or (team or {}).get("room_id") or (team or {}).get("invite_code"),
     }
 
 
@@ -1735,7 +1742,10 @@ async def get_invite_code(x_auth_token: Optional[str] = Header(None)):
     team = await _load_team_for_user(user)
     if not team:
         return {"ok": False, "error": "No team yet. Matchmaking must complete first."}
-    return {"ok": True, "invite_code": team.get("invite_code"), "room_id": team.get("room_id")}
+    room_code = str(team.get("room_id") or "").strip().upper()
+    if not room_code:
+        room_code = await _ensure_team_room(team)
+    return {"ok": True, "invite_code": room_code, "room_id": room_code}
 
 
 @app.post("/api/team/join-by-code")
@@ -1743,10 +1753,10 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
     if not await is_db_connected():
         raise HTTPException(status_code=503, detail="Joining team requires database connectivity")
     user = await _resolve_auth_user(x_auth_token)
-    invite_code = (payload.invite_code or "").strip().upper()
-    if not invite_code:
+    join_code = (payload.invite_code or "").strip().upper()
+    if not join_code:
         raise HTTPException(status_code=400, detail="invite_code is required")
-    team = await db.teams.find_one({"invite_code": invite_code})
+    team = await db.teams.find_one({"$or": [{"invite_code": join_code}, {"room_id": join_code}]})
     if not team:
         raise HTTPException(status_code=404, detail="Invite code not found")
     username = str(user.get("username") or "").strip()
@@ -1775,7 +1785,7 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
             "$set": {
                 "team_id": team.get("team_id"),
                 "room_id": None,
-                "invite_code": invite_code,
+                "invite_code": team_room_id,
                 "hackathon_id": team.get("hackathon_id") or user.get("hackathon_id"),
                 "looking_for_team": True,
                 "updated_at": int(time.time() * 1000),
@@ -1788,7 +1798,7 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
         "ok": True,
         "room_id": team_room_id,
         "team_id": team.get("team_id"),
-        "invite_code": invite_code,
+        "invite_code": team_room_id,
         "in_room": False,
     }
 
@@ -1841,11 +1851,11 @@ async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
         raise HTTPException(status_code=400, detail="Invalid user")
     normalized_hackathon_id = _normalize_hackathon_id(user.get("hackathon_id") or "default")
     team = await _load_team_for_user(user)
-    invite_code = user.get("invite_code") or (team or {}).get("invite_code")
     team_room_id: Optional[str] = None
     if team:
         existing_team_room_id = str(team.get("room_id") or "").strip().upper()
         team_room_id = existing_team_room_id or await _ensure_team_room(team)
+    invite_code = team_room_id or user.get("invite_code") or (team or {}).get("invite_code")
     if user.get("room_id"):
         return {
             "state": "in_room",
@@ -1869,19 +1879,113 @@ async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
     if exclude_team_id:
         candidate_filter["team_id"] = {"$ne": exclude_team_id}
     candidate_users = await db.users.find(candidate_filter).to_list(length=200)
-    candidate_payload = []
+    candidate_payload: List[Dict[str, Any]] = []
+    users_by_username = {
+        str(candidate.get("username") or "").strip(): candidate
+        for candidate in candidate_users
+        if str(candidate.get("username") or "").strip()
+    }
+    team_ids = sorted(
+        {
+            str(candidate.get("team_id") or "").strip()
+            for candidate in candidate_users
+            if str(candidate.get("team_id") or "").strip()
+        }
+    )
+    teams_by_id: Dict[str, Dict[str, Any]] = {}
+    if team_ids:
+        team_docs = await db.teams.find({"team_id": {"$in": team_ids}}).to_list(length=200)
+        teams_by_id = {
+            str(team_doc.get("team_id") or "").strip(): team_doc for team_doc in team_docs
+        }
+        missing_member_names = _normalize_member_names(
+            [
+                member_name
+                for team_doc in team_docs
+                for member_name in team_doc.get("member_names", [])
+                if member_name not in users_by_username and member_name != username
+            ]
+        )
+        if missing_member_names:
+            missing_users = await db.users.find({"username": {"$in": missing_member_names}}).to_list(length=400)
+            for missing_user in missing_users:
+                missing_username = str(missing_user.get("username") or "").strip()
+                if missing_username:
+                    users_by_username[missing_username] = missing_user
+
+    grouped_candidates: Dict[str, List[Dict[str, Any]]] = {}
     for candidate in candidate_users:
         candidate_username = str(candidate.get("username") or "").strip()
         if not candidate_username:
             continue
+        candidate_team_id = str(candidate.get("team_id") or "").strip()
+        candidate_key = (
+            f"team:{candidate_team_id}" if candidate_team_id and candidate_team_id in teams_by_id else f"solo:{candidate_username}"
+        )
+        grouped_candidates.setdefault(candidate_key, []).append(candidate)
+
+    def _merge_non_empty(parts: List[str]) -> str:
+        merged_parts: List[str] = []
+        seen_parts: set[str] = set()
+        for part in parts:
+            cleaned_part = " ".join(str(part or "").split()).strip()
+            if not cleaned_part:
+                continue
+            lowered_part = cleaned_part.lower()
+            if lowered_part in seen_parts:
+                continue
+            seen_parts.add(lowered_part)
+            merged_parts.append(cleaned_part)
+        return ", ".join(merged_parts)
+
+    for _candidate_key, grouped_users in grouped_candidates.items():
+        first_user = grouped_users[0]
+        grouped_team_id = str(first_user.get("team_id") or "").strip()
+        grouped_team_doc = teams_by_id.get(grouped_team_id) if grouped_team_id else None
+        if grouped_team_doc:
+            member_names = _normalize_member_names(grouped_team_doc.get("member_names", []))
+            member_names = [member_name for member_name in member_names if member_name != username]
+            if not member_names:
+                continue
+            member_docs = [users_by_username.get(member_name, {}) for member_name in member_names]
+            representative_name = member_names[0]
+            merged_skills = sorted(
+                {
+                    skill
+                    for member_doc in member_docs
+                    for skill in _normalize_skill_list(member_doc.get("skills", []))
+                }
+            )
+            candidate_payload.append(
+                {
+                    "username": representative_name,
+                    "member_usernames": member_names,
+                    "skills": merged_skills,
+                    "interest": _merge_non_empty([str(member_doc.get("interest") or "") for member_doc in member_docs]),
+                    "vibe": _merge_non_empty([str(member_doc.get("vibe") or "") for member_doc in member_docs]),
+                    "discord_username": _merge_non_empty(
+                        [str(member_doc.get("discord_username") or "") for member_doc in member_docs]
+                    ),
+                    "team_id": grouped_team_id,
+                    "invitee_username": representative_name,
+                    "is_team": len(member_names) > 1,
+                }
+            )
+            continue
+        solo_username = str(first_user.get("username") or "").strip()
+        if not solo_username:
+            continue
         candidate_payload.append(
             {
-                "username": candidate_username,
-                "skills": candidate.get("skills", []),
-                "interest": str(candidate.get("interest") or "").strip(),
-                "vibe": str(candidate.get("vibe") or "").strip(),
-                "discord_username": str(candidate.get("discord_username") or "").strip(),
-                "team_id": candidate.get("team_id"),
+                "username": solo_username,
+                "member_usernames": [solo_username],
+                "skills": _normalize_skill_list(first_user.get("skills", [])),
+                "interest": str(first_user.get("interest") or "").strip(),
+                "vibe": str(first_user.get("vibe") or "").strip(),
+                "discord_username": str(first_user.get("discord_username") or "").strip(),
+                "team_id": first_user.get("team_id"),
+                "invitee_username": solo_username,
+                "is_team": False,
             }
         )
     incoming_invites = await db.match_invites.find(
@@ -1959,6 +2063,7 @@ async def invite_matchmaking_user(
     inviter = await _resolve_auth_user(x_auth_token)
     inviter_name = str(inviter.get("username") or "").strip()
     invitee_name = _normalize_username(payload.invitee_username)
+    target_team_id_from_payload = " ".join(str(payload.invitee_team_id or "").split()).strip()
     if inviter.get("room_id"):
         raise HTTPException(
             status_code=409,
@@ -1982,18 +2087,38 @@ async def invite_matchmaking_user(
             status_code=409,
             detail="Invitee is in a different hackathon lobby.",
         )
-    if inviter.get("team_id") and inviter.get("team_id") == invitee.get("team_id"):
+    inviter_team_id = str(inviter.get("team_id") or "").strip()
+    invitee_team_id = str(invitee.get("team_id") or "").strip()
+    target_team_id = target_team_id_from_payload or invitee_team_id or inviter_team_id
+    if target_team_id_from_payload and target_team_id_from_payload != invitee_team_id:
+        raise HTTPException(status_code=409, detail="Invite target no longer matches that teammate's team.")
+    if inviter_team_id and target_team_id and inviter_team_id != target_team_id:
+        raise HTTPException(
+            status_code=409,
+            detail="You are already in a different team. Leave it first before requesting to join another team.",
+        )
+    if inviter_team_id and inviter_team_id == invitee_team_id:
         raise HTTPException(status_code=400, detail="This user is already on your team.")
-    existing_pending = await db.match_invites.find_one(
-        {
-            "hackathon_id": normalized_hackathon_id,
-            "status": "pending",
-            "$or": [
-                {"inviter_name": inviter_name, "invitee_name": invitee_name},
-                {"inviter_name": invitee_name, "invitee_name": inviter_name},
-            ],
-        }
-    )
+    if target_team_id:
+        existing_pending = await db.match_invites.find_one(
+            {
+                "hackathon_id": normalized_hackathon_id,
+                "status": "pending",
+                "inviter_name": inviter_name,
+                "team_id": target_team_id,
+            }
+        )
+    else:
+        existing_pending = await db.match_invites.find_one(
+            {
+                "hackathon_id": normalized_hackathon_id,
+                "status": "pending",
+                "$or": [
+                    {"inviter_name": inviter_name, "invitee_name": invitee_name},
+                    {"inviter_name": invitee_name, "invitee_name": inviter_name},
+                ],
+            }
+        )
     if existing_pending:
         return {
             "ok": True,
@@ -2005,7 +2130,7 @@ async def invite_matchmaking_user(
         "hackathon_id": normalized_hackathon_id,
         "inviter_name": inviter_name,
         "invitee_name": invitee_name,
-        "team_id": inviter.get("team_id"),
+        "team_id": target_team_id or None,
         "status": "pending",
         "created_at": int(time.time() * 1000),
         "updated_at": int(time.time() * 1000),
@@ -2052,24 +2177,50 @@ async def respond_matchmaking_invite(
             status_code=409,
             detail="Cannot accept invite because one user is already in a room.",
         )
-    inviter_team = await _ensure_team_for_user(inviter)
-    team_room_id = await _ensure_team_room(inviter_team)
-    invitee_team_id = invitee.get("team_id")
-    if invitee_team_id and invitee_team_id != inviter_team.get("team_id"):
-        raise HTTPException(
-            status_code=409,
-            detail="You are already in another team. Leave that team first.",
-        )
+    target_team_id = str(invite.get("team_id") or "").strip()
+    target_team: Optional[Dict[str, Any]] = None
+    if target_team_id:
+        target_team = await db.teams.find_one({"team_id": target_team_id})
+        if not target_team:
+            await db.match_invites.update_one(
+                {"_id": invite.get("_id")},
+                {"$set": {"status": "cancelled", "updated_at": int(time.time() * 1000)}},
+            )
+            raise HTTPException(status_code=409, detail="The invited team no longer exists.")
+        inviter_team_id = str(inviter.get("team_id") or "").strip()
+        invitee_team_id = str(invitee.get("team_id") or "").strip()
+        if inviter_team_id and inviter_team_id != target_team_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Inviter is already in another team. Leave that team first.",
+            )
+        if invitee_team_id and invitee_team_id != target_team_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Invitee is already in another team. Leave that team first.",
+            )
+    if not target_team:
+        target_team = await _ensure_team_for_user(inviter)
+        target_team_id = str(target_team.get("team_id") or "").strip()
+        invitee_team_id = str(invitee.get("team_id") or "").strip()
+        if invitee_team_id and invitee_team_id != target_team_id:
+            raise HTTPException(
+                status_code=409,
+                detail="You are already in another team. Leave that team first.",
+            )
+
+    team_room_id = await _ensure_team_room(target_team)
     member_names = _normalize_member_names(
-        inviter_team.get("member_names", []) + [invitee_name]
+        target_team.get("member_names", []) + [inviter_name, invitee_name]
     )
     now = int(time.time() * 1000)
     await db.teams.update_one(
-        {"team_id": inviter_team.get("team_id")},
+        {"team_id": target_team_id},
         {
             "$set": {
                 "member_names": member_names,
                 "room_id": team_room_id,
+                "invite_code": team_room_id,
                 "status": "forming",
                 "updated_at": now,
             }
@@ -2079,9 +2230,9 @@ async def respond_matchmaking_invite(
         {"username": {"$in": member_names}},
         {
             "$set": {
-                "team_id": inviter_team.get("team_id"),
-                "invite_code": inviter_team.get("invite_code"),
-                "hackathon_id": inviter_team.get("hackathon_id"),
+                "team_id": target_team_id,
+                "invite_code": team_room_id,
+                "hackathon_id": target_team.get("hackathon_id") or _normalize_hackathon_id(invite.get("hackathon_id") or "default"),
                 "room_id": None,
                 "looking_for_team": True,
                 "updated_at": now,
@@ -2093,7 +2244,7 @@ async def respond_matchmaking_invite(
         {
             "$set": {
                 "status": "accepted",
-                "team_id": inviter_team.get("team_id"),
+                "team_id": target_team_id,
                 "updated_at": now,
             }
         },
@@ -2105,8 +2256,8 @@ async def respond_matchmaking_invite(
     return {
         "ok": True,
         "state": "accepted",
-        "team_id": inviter_team.get("team_id"),
-        "invite_code": inviter_team.get("invite_code"),
+        "team_id": target_team_id,
+        "invite_code": team_room_id,
         "room_id": team_room_id,
     }
 
@@ -2125,12 +2276,7 @@ async def leave_matchmaking(x_auth_token: Optional[str] = Header(None)):
         }
     team_doc = await _ensure_team_for_user(user)
     room_id = await _ensure_team_room(team_doc)
-    invite_code = str(team_doc.get("invite_code") or "").strip().upper() or _new_team_invite_code()
-    if not str(team_doc.get("invite_code") or "").strip():
-        await db.teams.update_one(
-            {"team_id": team_doc.get("team_id")},
-            {"$set": {"invite_code": invite_code, "updated_at": int(time.time() * 1000)}},
-        )
+    invite_code = room_id
     await _mark_team_in_room(team_doc, room_id, invite_code)
     return {
         "ok": True,
@@ -2180,6 +2326,9 @@ async def leave_matchmaking_team(x_auth_token: Optional[str] = Header(None)):
         for member_name in _normalize_member_names(team_doc.get("member_names", []))
         if member_name != username
     ]
+    remaining_team_code = str(team_doc.get("room_id") or team_doc.get("invite_code") or "").strip().upper()
+    if len(remaining_members) >= 2 and not remaining_team_code:
+        remaining_team_code = await _ensure_team_room(team_doc)
 
     if len(remaining_members) >= 2:
         await db.teams.update_one(
@@ -2198,7 +2347,7 @@ async def leave_matchmaking_team(x_auth_token: Optional[str] = Header(None)):
                 "$set": {
                     "team_id": team_id,
                     "room_id": None,
-                    "invite_code": team_doc.get("invite_code"),
+                    "invite_code": remaining_team_code,
                     "looking_for_team": True,
                     "updated_at": now,
                 }
