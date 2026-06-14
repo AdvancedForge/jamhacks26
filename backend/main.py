@@ -1476,37 +1476,7 @@ def _safe_chat_fallback(user_message: str, task_title: Optional[str] = None) -> 
             "Hey! I’m here and ready to help. What do you want to tackle on the board?"
         )
 
-    return "err"
-
-
-async def _build_recent_chat_context(room_id: str, limit: int = 8) -> str:
-    try:
-        if not await is_db_connected():
-            return "No recent chat history available."
-
-        recent_messages = (
-            await db.chat_messages.find({"room_id": room_id})
-            .sort("timestamp", -1)
-            .to_list(length=max(1, min(limit, 20)))
-        )
-        if not recent_messages:
-            return "No prior chat messages."
-
-        ordered_messages = list(reversed(recent_messages))
-        lines: List[str] = []
-        for message in ordered_messages:
-            sender = str(message.get("sender") or "Unknown").strip() or "Unknown"
-            text = re.sub(r"\s+", " ", str(message.get("message") or "")).strip()
-            if not text:
-                continue
-            if len(text) > 260:
-                text = f"{text[:257]}..."
-            lines.append(f"- {sender}: {text}")
-
-        return "\n".join(lines) if lines else "No prior chat messages."
-    except Exception as history_error:
-        logger.warning(f"Unable to build recent chat context: {history_error}")
-        return "Recent chat history unavailable."
+    return "Got your message. I can help break this into clear next tasks."
 
 
 # --- Chat Endpoints ---
@@ -1710,7 +1680,6 @@ async def send_chat_message(
                 member_summary = (
                     ", ".join(member_names) if member_names else "No known members yet."
                 )
-                recent_chat_context = await _build_recent_chat_context(chat.room_id)
 
                 prompt = (
                     "You are HackBuddy AI, a project board assistant. "
@@ -1737,7 +1706,6 @@ async def send_chat_message(
                     f"Team members (valid assignees): {member_summary}\n"
                     f"Whiteboard: {whiteboard_summary}\n"
                     f"Whiteboard image context: {whiteboard_image_hint}\n"
-                    f"Recent chat messages:\n{recent_chat_context}\n"
                     f"Roadmap text selection: {roadmap_selection}\n"
                     f"Tasks:\n{tasks_summary}\n"
                     f"Roadmap:\n{roadmap_content}\n"
@@ -1774,46 +1742,38 @@ async def send_chat_message(
 
                 result = _extract_json_object(response_text)
                 if result and "tasks" in result and isinstance(result["tasks"], list):
-                    try:
-                        member_names_for_assignment = [
-                            str(member.get("name", "")).strip()
-                            for member in room_members
-                            if str(member.get("name", "")).strip()
-                        ]
-                        for task_data in result["tasks"]:
-                            normalized_assignee = _normalize_assignee_name(
-                                task_data.get("assignee"), member_names_for_assignment
+                    member_names_for_assignment = [
+                        str(member.get("name", "")).strip()
+                        for member in room_members
+                        if str(member.get("name", "")).strip()
+                    ]
+                    for task_data in result["tasks"]:
+                        normalized_assignee = _normalize_assignee_name(
+                            task_data.get("assignee"), member_names_for_assignment
+                        )
+                        if "id" in task_data:
+                            task = Task(
+                                title=str(task_data.get("title") or "Untitled Task"),
+                                description=str(task_data.get("description") or ""),
+                                column=str(task_data.get("column") or "Backlog"),
+                                assignee=normalized_assignee or "",
+                                updated_at=int(time.time() * 1000),
                             )
-                            if "id" in task_data:
-                                task = Task(
-                                    title=str(task_data.get("title") or "Untitled Task"),
-                                    description=str(task_data.get("description") or ""),
-                                    column=str(task_data.get("column") or "Backlog"),
-                                    assignee=normalized_assignee or "",
-                                    updated_at=int(time.time() * 1000),
-                                )
-                                await update_task(chat.room_id, task_data["id"], task)
-                            else:
-                                task = Task(
-                                    title=str(task_data.get("title") or "Untitled Task"),
-                                    description=str(task_data.get("description") or ""),
-                                    column=str(task_data.get("column") or "Backlog"),
-                                    assignee=normalized_assignee or "",
-                                    created_at=int(time.time() * 1000),
-                                )
-                                await create_task(chat.room_id, task)
-                    except Exception as task_update_error:
-                        logger.warning(f"Task update skipped due to error: {task_update_error}")
+                            await update_task(chat.room_id, task_data["id"], task)
+                        else:
+                            task = Task(
+                                title=str(task_data.get("title") or "Untitled Task"),
+                                description=str(task_data.get("description") or ""),
+                                column=str(task_data.get("column") or "Backlog"),
+                                assignee=normalized_assignee or "",
+                                created_at=int(time.time() * 1000),
+                            )
+                            await create_task(chat.room_id, task)
 
                 if result and "roadmap" in result and isinstance(result["roadmap"], dict):
-                    try:
-                        await update_roadmap(
-                            chat.room_id, {"roadmap": json.dumps(result["roadmap"])}
-                        )
-                    except Exception as roadmap_update_error:
-                        logger.warning(
-                            f"Roadmap update skipped due to error: {roadmap_update_error}"
-                        )
+                    await update_roadmap(
+                        chat.room_id, {"roadmap": json.dumps(result["roadmap"])}
+                    )
 
                 ai_reply = (
                     result.get("reply")
@@ -1822,12 +1782,14 @@ async def send_chat_message(
                 )
                 if not ai_reply:
                     ai_reply = _strip_markdown_code_fences(response_text)
-                ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
                 if not ai_reply:
-                    ai_reply = _safe_chat_fallback(chat.message, task_title)
+                    ai_reply = "I'm not sure how to answer that, could you rephrase?"
+                ai_reply = _sanitize_chat_reply(ai_reply, chat.message)
         except Exception as error:
             logger.warning(f"AI error: {error}")
-            ai_reply = _safe_chat_fallback(chat.message, task_title)
+            ai_reply = (
+                "I'm having trouble answering that right now, could you please rephrase?"
+            )
 
         if not ai_reply:
             ai_reply = _safe_chat_fallback(chat.message, task_title)
