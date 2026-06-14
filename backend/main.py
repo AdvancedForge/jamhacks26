@@ -594,6 +594,29 @@ def _normalize_member_names(raw_names: List[Any]) -> List[str]:
     return normalized
 
 
+async def _cancel_pending_invites_for_users(
+    usernames: List[str], *, hackathon_id: Optional[str] = None
+) -> None:
+    if not await is_db_connected():
+        return
+    normalized_names = _normalize_member_names(usernames)
+    if not normalized_names:
+        return
+    filter_query: Dict[str, Any] = {
+        "status": "pending",
+        "$or": [
+            {"inviter_name": {"$in": normalized_names}},
+            {"invitee_name": {"$in": normalized_names}},
+        ],
+    }
+    if hackathon_id:
+        filter_query["hackathon_id"] = _normalize_hackathon_id(hackathon_id)
+    await db.match_invites.update_many(
+        filter_query,
+        {"$set": {"status": "cancelled", "updated_at": int(time.time() * 1000)}},
+    )
+
+
 def _participant_summary(participant: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "username": str(participant.get("name") or "").strip(),
@@ -1794,6 +1817,10 @@ async def join_team_by_code(payload: JoinTeamByCodePayload, x_auth_token: Option
     )
     latest_user = await db.users.find_one({"username": username}) or user
     await _upsert_match_participant_from_user(latest_user, status="searching")
+    await _cancel_pending_invites_for_users(
+        [username],
+        hackathon_id=team.get("hackathon_id") or user.get("hackathon_id"),
+    )
     return {
         "ok": True,
         "room_id": team_room_id,
@@ -2168,6 +2195,8 @@ async def respond_matchmaking_invite(
     inviter = await db.users.find_one({"username": inviter_name})
     if not inviter:
         raise HTTPException(status_code=404, detail="Inviter no longer exists")
+    inviter_original_team_id = str(inviter.get("team_id") or "").strip()
+    invitee_original_team_id = str(invitee.get("team_id") or "").strip()
     if inviter.get("room_id") or invitee.get("room_id"):
         await db.match_invites.update_one(
             {"_id": invite.get("_id")},
@@ -2187,14 +2216,12 @@ async def respond_matchmaking_invite(
                 {"$set": {"status": "cancelled", "updated_at": int(time.time() * 1000)}},
             )
             raise HTTPException(status_code=409, detail="The invited team no longer exists.")
-        inviter_team_id = str(inviter.get("team_id") or "").strip()
-        invitee_team_id = str(invitee.get("team_id") or "").strip()
-        if inviter_team_id and inviter_team_id != target_team_id:
+        if inviter_original_team_id and inviter_original_team_id != target_team_id:
             raise HTTPException(
                 status_code=409,
                 detail="Inviter is already in another team. Leave that team first.",
             )
-        if invitee_team_id and invitee_team_id != target_team_id:
+        if invitee_original_team_id and invitee_original_team_id != target_team_id:
             raise HTTPException(
                 status_code=409,
                 detail="Invitee is already in another team. Leave that team first.",
@@ -2202,8 +2229,7 @@ async def respond_matchmaking_invite(
     if not target_team:
         target_team = await _ensure_team_for_user(inviter)
         target_team_id = str(target_team.get("team_id") or "").strip()
-        invitee_team_id = str(invitee.get("team_id") or "").strip()
-        if invitee_team_id and invitee_team_id != target_team_id:
+        if invitee_original_team_id and invitee_original_team_id != target_team_id:
             raise HTTPException(
                 status_code=409,
                 detail="You are already in another team. Leave that team first.",
@@ -2253,6 +2279,15 @@ async def respond_matchmaking_invite(
     refreshed_invitee = await db.users.find_one({"username": invitee_name}) or invitee
     await _upsert_match_participant_from_user(refreshed_inviter, status="searching")
     await _upsert_match_participant_from_user(refreshed_invitee, status="searching")
+    newly_joined_usernames: List[str] = []
+    if inviter_original_team_id != target_team_id:
+        newly_joined_usernames.append(inviter_name)
+    if invitee_original_team_id != target_team_id:
+        newly_joined_usernames.append(invitee_name)
+    await _cancel_pending_invites_for_users(
+        newly_joined_usernames,
+        hackathon_id=target_team.get("hackathon_id") or invite.get("hackathon_id"),
+    )
     return {
         "ok": True,
         "state": "accepted",

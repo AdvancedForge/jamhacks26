@@ -417,9 +417,9 @@ export default function MatchingPage({
         )}
 
         {(status.outgoing_invites || []).length > 0 && (
-          <section className="self-start w-fit max-w-full bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-4">
+          <section className="self-start inline-flex flex-col w-auto max-w-[560px] bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-4">
             <h3 className="text-[16px] text-white font-medium">Pending Outgoing Invites</h3>
-            <div className="mt-3 flex flex-wrap gap-2 max-w-[560px]">
+            <div className="mt-3 flex flex-wrap gap-2">
               {(status.outgoing_invites || []).map((invite) => (
                 <span key={invite.invite_id} className="text-[13px] text-[#d4d4d8] bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2">
                   {invite.to_username}
