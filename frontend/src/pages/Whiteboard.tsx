@@ -641,7 +641,7 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
 
   return (
     <div className="flex h-screen bg-[#08090a] overflow-hidden relative">
-        <div className="flex-1 relative">
+        <div data-tour="whiteboard-canvas" className="flex-1 relative">
             <Excalidraw
                 theme="dark"
                 excalidrawAPI={(api: any) => setExcalidrawAPI(api)}
@@ -657,7 +657,7 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
                 }}
             />
             {/* Minimal controls overlay */}
-            <div className="absolute top-4 left-4 flex gap-2">
+            <div data-tour="whiteboard-ai-tools" className="absolute top-4 left-4 flex gap-2">
                 <button onClick={handleGenerate} className="bg-white text-black px-4 py-2 rounded-lg text-sm font-semibold hover:bg-gray-200">Generate Code</button>
                 <button onClick={handleFeedback} className="bg-gray-800 text-white px-4 py-2 rounded-lg text-sm hover:bg-gray-700">🤖 AI Feedback</button>
             </div>

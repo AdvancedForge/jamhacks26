@@ -591,7 +591,7 @@ export default function BoardPage({
         onDragCancel={handleDragCancel}
         onDragEnd={handleDragEnd}
       >
-        <div className="flex-1 overflow-x-auto overflow-y-hidden p-5 flex gap-4 min-h-0 relative z-10">
+        <div data-tour="kanban-board" className="flex-1 overflow-x-auto overflow-y-hidden p-5 flex gap-4 min-h-0 relative z-10">
           {COLUMNS.map((columnName) => (
             <Column
               key={columnName}
@@ -623,6 +623,7 @@ export default function BoardPage({
       >
         <button
           onClick={() => setIsChatOpen((open) => !open)}
+          data-tour="kanban-ai-chat-toggle"
           className="absolute -left-10 top-1/2 -mt-5 p-2 bg-[#08090a] border border-white/[0.06] rounded-l-xl text-[#71717a] hover:text-white"
           aria-label={isChatOpen ? "Close chat sidebar" : "Open chat sidebar"}
         >

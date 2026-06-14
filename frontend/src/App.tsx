@@ -16,9 +16,12 @@ const PAGE_STORAGE_KEY = "hb_page";
 const ROOM_STORAGE_KEY = "hb_room_code";
 const DISPLAY_NAME_STORAGE_KEY = "hb_display_name";
 const DASHBOARD_WALKTHROUGH_STORAGE_KEY = "hb_dashboard_walkthrough_seen";
-type SpotlightTarget = "nav" | "main";
+type SpotlightTarget = "nav" | "main" | "selector";
 type SpotlightStep = {
   target: SpotlightTarget;
+  selector?: string;
+  page?: AppPage;
+  padding?: number;
   title: string;
   description: string;
 };
@@ -30,9 +33,44 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
     description: "Use these tabs to jump between Kanban, Whiteboard, Integrations, and Roadmap.",
   },
   {
-    target: "main",
-    title: "This is your task area",
-    description: "This panel is where your board, whiteboard, and collaboration tools appear based on the tab you selected.",
+    target: "selector",
+    page: "Kanban",
+    selector: '[data-tour=\"kanban-board\"]',
+    padding: 10,
+    title: "Kanban section",
+    description: "Plan work in columns, drag tasks across stages, and keep assignments synchronized live for everyone in the room.",
+  },
+  {
+    target: "selector",
+    page: "Kanban",
+    selector: '[data-tour=\"kanban-ai-chat-toggle\"]',
+    padding: 12,
+    title: "AI section (Kanban chat)",
+    description: "Open the AI chat drawer to brainstorm tasks, summarize progress, and collaborate with model-assisted responses in context.",
+  },
+  {
+    target: "selector",
+    page: "Whiteboard",
+    selector: '[data-tour=\"whiteboard-canvas\"]',
+    padding: 10,
+    title: "Whiteboard section",
+    description: "Sketch architecture and product flows on the shared Excalidraw canvas with continuous sync for your team.",
+  },
+  {
+    target: "selector",
+    page: "Whiteboard",
+    selector: '[data-tour=\"whiteboard-ai-tools\"]',
+    padding: 10,
+    title: "AI tools on Whiteboard",
+    description: "Use Generate Code and AI Feedback to turn drawings into implementation ideas and instant critique.",
+  },
+  {
+    target: "selector",
+    page: "Integrations",
+    selector: '[data-tour=\"integrations-workspace\"]',
+    padding: 10,
+    title: "Integration section",
+    description: "Manage onboarding profile, repo tracking, Discord teammate posts, and API configuration from one collaboration hub.",
   },
 ];
 
@@ -235,10 +273,21 @@ export default function App() {
     if (!showDashboardWalkthrough) return;
     setWalkthroughStepIndex(0);
   }, [showDashboardWalkthrough]);
+  useEffect(() => {
+    if (!showDashboardWalkthrough || !activeWalkthroughStep?.page) return;
+    if (page === activeWalkthroughStep.page) return;
+    setPage(activeWalkthroughStep.page);
+    localStorage.setItem(PAGE_STORAGE_KEY, activeWalkthroughStep.page);
+  }, [activeWalkthroughStep, page, showDashboardWalkthrough]);
 
   const getSpotlightTarget = useCallback(
-    (target: SpotlightTarget) => {
-      if (target === "nav") return navSpotlightRef.current;
+    (step: SpotlightStep) => {
+      if (step.target === "nav") return navSpotlightRef.current;
+      if (step.target === "main") return mainSpotlightRef.current;
+      if (step.selector) {
+        const selectedElement = document.querySelector<HTMLElement>(step.selector);
+        if (selectedElement) return selectedElement;
+      }
       return mainSpotlightRef.current;
     },
     [],
@@ -250,13 +299,13 @@ export default function App() {
       return;
     }
     const updateSpotlight = () => {
-      const targetElement = getSpotlightTarget(activeWalkthroughStep.target);
+      const targetElement = getSpotlightTarget(activeWalkthroughStep);
       if (!targetElement) {
         setSpotlightRect(null);
         return;
       }
       const rect = targetElement.getBoundingClientRect();
-      const padding = activeWalkthroughStep.target === "main" ? 10 : 6;
+      const padding = activeWalkthroughStep.padding ?? (activeWalkthroughStep.target === "main" ? 10 : 6);
       setSpotlightRect({
         top: Math.max(8, rect.top - padding),
         left: Math.max(8, rect.left - padding),

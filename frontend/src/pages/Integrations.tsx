@@ -213,7 +213,7 @@ export default function IntegrationsPage({
 
   return (
     <div className="flex-1 overflow-y-auto p-8 bg-[#08090a]">
-      <div className="max-w-2xl mx-auto flex flex-col gap-10">
+      <div data-tour="integrations-workspace" className="max-w-2xl mx-auto flex flex-col gap-10">
         <section>
           <h2 className="text-[18px] font-semibold text-white mb-2">Onboarding profile</h2>
           <p className="text-[14px] text-[#52525b] mb-5 leading-relaxed">

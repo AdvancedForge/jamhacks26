@@ -47,7 +47,7 @@ export default function Topbar({
         <span className="text-white text-[15px] font-semibold tracking-tight hidden sm:block">HackBuddy</span>
       </div>
 
-      <nav ref={navRef} className="flex gap-1 bg-white/2 border border-white/4 rounded-lg p-1">
+      <nav ref={navRef} data-tour="top-nav" className="flex gap-1 bg-white/2 border border-white/4 rounded-lg p-1">
         {NAV.map((nav) => (
           <button
             key={nav}
