@@ -14,6 +14,7 @@ export default function EntryScreen({
   onAuthenticated: (token: string, user: AuthUser, profile: OnboardingProfile) => void;
 }) {
   const [mode, setMode] = useState<"signup" | "login">("signup");
+  const [signupStep, setSignupStep] = useState<1 | 2>(1);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [username, setUsername] = useState("");
@@ -48,6 +49,13 @@ export default function EntryScreen({
     if (profile.skills.length === 0) return "Add at least one skill.";
     if (!profile.interest) return "Interest is required.";
     if (profile.lookingForTeam && !profile.vibe) return "Vibe is required when looking for a team.";
+    return "";
+  };
+
+  const validateSignupStepOne = () => {
+    if (!username.trim()) return "Username is required.";
+    if (!password.trim()) return "Password is required.";
+    if (!hackathonId.trim()) return "Hackathon is required.";
     return "";
   };
 
@@ -110,7 +118,7 @@ export default function EntryScreen({
     }
   };
 
-  const actionLabel = mode === "signup" ? "Create account" : "Login";
+  const actionLabel = mode === "signup" ? (signupStep === 1 ? "Continue" : "Create account") : "Login";
 
   return (
     <div className="min-h-screen bg-[#08090a] flex items-center justify-center px-4 relative overflow-hidden">
@@ -136,7 +144,7 @@ export default function EntryScreen({
 
         <div className="bg-[#0f1012]/80 backdrop-blur-xl border border-white/[0.06] rounded-2xl p-8 flex flex-col gap-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_50px_rgba(0,0,0,0.5)]">
           <label className="text-[11px] uppercase tracking-wider text-[#52525b] font-medium">
-            {mode === "signup" ? "Create your account + NSIV" : "Login"}
+            {mode === "signup" ? `Create your account · Step ${signupStep}/2` : "Login"}
           </label>
 
           <input
@@ -160,17 +168,23 @@ export default function EntryScreen({
             className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
           />
 
-          {mode === "signup" && (
+          {mode === "signup" && signupStep === 1 && (
+            <input
+              value={hackathonId}
+              onChange={(e) => {
+                setHackathonId(e.target.value);
+                setErr("");
+              }}
+              placeholder="Hackathon (e.g. jamhacks26)"
+              className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+            />
+          )}
+
+          {mode === "signup" && signupStep === 2 && (
             <>
-              <input
-                value={hackathonId}
-                onChange={(e) => {
-                  setHackathonId(e.target.value);
-                  setErr("");
-                }}
-                placeholder="Hackathon (e.g. jamhacks26)"
-                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
-              />
+              <p className="text-[12px] text-[#71717a]">
+                Hackathon: <span className="text-[#d4d4d8]">{hackathonId.trim()}</span>
+              </p>
               <select
                 value={lookingForTeam}
                 onChange={(e) => {
@@ -256,17 +270,45 @@ export default function EntryScreen({
           )}
 
           <button
-            onClick={() => void (mode === "signup" ? handleSignup() : handleLogin())}
+            onClick={() => {
+              if (mode === "login") {
+                void handleLogin();
+                return;
+              }
+              if (signupStep === 1) {
+                const validationError = validateSignupStepOne();
+                if (validationError) {
+                  setErr(validationError);
+                  return;
+                }
+                setErr("");
+                setSignupStep(2);
+                return;
+              }
+              void handleSignup();
+            }}
             disabled={loading}
             className="w-full flex items-center justify-center gap-2.5 bg-white text-[#09090b] font-semibold text-[14px] py-3 rounded-xl transition-all hover:shadow-[0_0_30px_rgba(255,255,255,0.15)] disabled:opacity-50"
           >
             {loading ? <span className="w-4 h-4 border-2 border-[#09090b]/20 border-t-[#09090b] rounded-full animate-spin" /> : null}
             {actionLabel}
           </button>
+          {mode === "signup" && signupStep === 2 && (
+            <button
+              onClick={() => {
+                setSignupStep(1);
+                setErr("");
+              }}
+              className="text-[13px] text-[#a1a1aa] border border-white/[0.08] rounded-xl py-2.5 hover:bg-white/[0.03]"
+            >
+              Back to account step
+            </button>
+          )}
 
           <button
             onClick={() => {
               setMode((currentMode) => (currentMode === "signup" ? "login" : "signup"));
+              setSignupStep(1);
               setErr("");
             }}
             className="text-[13px] text-[#a1a1aa] border border-white/[0.08] rounded-xl py-2.5 hover:bg-white/[0.03]"

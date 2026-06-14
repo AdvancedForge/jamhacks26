@@ -25,10 +25,12 @@ export default function MatchingPage({
   profile,
   authToken,
   toast,
+  onTeamReady,
 }: {
   profile: OnboardingProfile;
   authToken: string;
   toast: ToastFn;
+  onTeamReady: (roomCode: string) => void;
 }) {
   const [status, setStatus] = useState<MatchStatusResponse>({ state: "waiting" });
   const [loadingDecision, setLoadingDecision] = useState(false);
@@ -79,7 +81,10 @@ export default function MatchingPage({
       )}&name=${encodeURIComponent(profile.name)}`,
     );
     setStatus(response);
-  }, [lobbyRoomId, profile.hackathonId, profile.lookingForTeam, profile.name]);
+    if (response.state === "matched" && response.room_id) {
+      onTeamReady(response.room_id);
+    }
+  }, [lobbyRoomId, onTeamReady, profile.hackathonId, profile.lookingForTeam, profile.name]);
 
   useEffect(() => {
     let mounted = true;
@@ -131,12 +136,13 @@ export default function MatchingPage({
       return;
     }
     try {
-      await apiFetch("/api/team/join-by-code", {
+      const response = await apiFetch<{ room_id?: string }>("/api/team/join-by-code", {
         method: "POST",
         headers: { "X-Auth-Token": authToken },
         body: JSON.stringify({ invite_code: code }),
       });
       toast("Joined team via invite code.", "success");
+      if (response.room_id) onTeamReady(response.room_id);
       await fetchStatus();
     } catch {
       toast("Could not join team with that code.", "error");
@@ -154,6 +160,16 @@ export default function MatchingPage({
           {status.state === "waiting" && (
             <p className="text-[14px] text-[#a1a1aa] mt-4">
               {status.message || "Thanks! You’ll be matched with a team soon."}
+            </p>
+          )}
+          {status.state === "proposal" && (
+            <p className="text-[14px] text-[#a1a1aa] mt-4">
+              {status.message || "A team request is waiting for your response."}
+            </p>
+          )}
+          {status.state === "pending" && (
+            <p className="text-[14px] text-[#a1a1aa] mt-4">
+              Decision sent. Waiting for your potential teammate(s) to respond.
             </p>
           )}
           {status.state === "solo" && (

@@ -96,6 +96,26 @@ export default function App() {
     setPage(newPage);
     localStorage.setItem("hb_page", newPage);
   };
+  const handleTeamReady = (nextRoomCode: string) => {
+    const normalizedRoomCode = (nextRoomCode || "").trim();
+    if (!normalizedRoomCode) return;
+    setRoomCode(normalizedRoomCode);
+    setPage("Kanban");
+    localStorage.setItem("hb_page", "Kanban");
+    setAuthUser((currentUser) => {
+      if (!currentUser) return currentUser;
+      const updatedUser = { ...currentUser, room_id: normalizedRoomCode };
+      localStorage.setItem("hb_auth_user", JSON.stringify(updatedUser));
+      return updatedUser;
+    });
+  };
+  useEffect(() => {
+    if (!profile && authUser) {
+      const recoveredProfile = profileFromAuthUser(authUser);
+      setProfile(recoveredProfile);
+      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(recoveredProfile));
+    }
+  }, [authUser, profile]);
   useEffect(() => {
     if (!authToken) return;
     const refresh = async () => {
@@ -153,7 +173,7 @@ export default function App() {
 
       <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
         {(!roomCode || page === "Matching") && (
-          <MatchingPage profile={profile} authToken={authToken} toast={toast} />
+          <MatchingPage profile={profile} authToken={authToken} toast={toast} onTeamReady={handleTeamReady} />
         )}
         {page === "Kanban" && roomCode && (
           <BoardPage
