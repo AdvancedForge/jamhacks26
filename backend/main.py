@@ -1100,9 +1100,11 @@ async def send_chat_message(
                 "You are HackBuddy AI, a project board assistant. "
                 "You have access to the project board tasks and the roadmap. "
                 "Analyze the message and provide a helpful, conversational, and contextually relevant reply. "
-                'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": {"vision": "...", "phases": {...}}}. '
+                'Return valid JSON: {"tasks": [...], "reply": "...", "roadmap": {"vision": "...", "phases": {"Phase Name": ["task_id_1"]}}}. '
                 '"tasks" should be a list of ONLY new tasks to create or existing tasks that need updates (must include "id" to update). If no tasks are needed, return an empty list []. '
-                '"roadmap" should be a JSON object with "vision" (string) and "phases" (dictionary of phase names to lists of task IDs). Only return if changes to vision or phases are requested, otherwise omit. '
+                '"roadmap" must be a JSON object with "vision" (string) and "phases" (dictionary mapping phase names to arrays of task IDs). '
+                'Example: {"vision": "Build MVP", "phases": {"Phase 1": ["t_1"], "Phase 2": ["t_2"]}}. '
+                'Only return this if changes are explicitly requested. If a task ID exists in board tasks but is NOT in any phase, it is "Unassigned". '
                 '"reply" MUST be a direct, relevant answer to the user. '
                 'When setting "assignee" for tasks, use ONLY names from the provided team member list. '
                 "If the user asks a question, answer it based on the provided tasks and roadmap. "
