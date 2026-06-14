@@ -18,26 +18,36 @@ export default function EntryScreen({
   const [err, setErr] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [hackathonId, setHackathonId] = useState("default");
+  const [hackathonId, setHackathonId] = useState("");
+  const [lookingForTeam, setLookingForTeam] = useState<"" | "yes" | "no">("");
   const [skillsInput, setSkillsInput] = useState("");
   const [interest, setInterest] = useState("");
   const [vibe, setVibe] = useState("");
+  const [discordUsername, setDiscordUsername] = useState("");
+  const [anonymousInMatching, setAnonymousInMatching] = useState(false);
+  const [showDiscordWhenAnonymous, setShowDiscordWhenAnonymous] = useState(true);
 
   const buildProfile = (nextUser?: AuthUser): OnboardingProfile => ({
-    hackathonId: nextUser?.hackathon_id || hackathonId.trim() || "default",
+    hackathonId: nextUser?.hackathon_id || hackathonId.trim() || "",
     name: nextUser?.username || username.trim(),
+    lookingForTeam: nextUser?.looking_for_team ?? (lookingForTeam === "yes"),
     skills: nextUser?.skills || parseSkills(skillsInput),
     interest: nextUser?.interest || interest.trim(),
     vibe: nextUser?.vibe || vibe.trim(),
+    discordUsername: nextUser?.discord_username || discordUsername.trim(),
+    anonymousInMatching: nextUser?.anonymous_in_matching ?? anonymousInMatching,
+    showDiscordWhenAnonymous: nextUser?.show_discord_when_anonymous ?? showDiscordWhenAnonymous,
   });
 
   const validateSignup = () => {
     const profile = buildProfile();
     if (!profile.name) return "Username is required.";
     if (!password.trim()) return "Password is required.";
+    if (!profile.hackathonId) return "Hackathon is required.";
+    if (lookingForTeam !== "yes" && lookingForTeam !== "no") return "Select whether you're looking for a team.";
     if (profile.skills.length === 0) return "Add at least one skill.";
     if (!profile.interest) return "Interest is required.";
-    if (!profile.vibe) return "Vibe is required.";
+    if (profile.lookingForTeam && !profile.vibe) return "Vibe is required when looking for a team.";
     return "";
   };
 
@@ -55,10 +65,14 @@ export default function EntryScreen({
         body: JSON.stringify({
           username: username.trim(),
           password: password.trim(),
-          hackathon_id: hackathonId.trim() || "default",
+          hackathon_id: hackathonId.trim(),
+          looking_for_team: lookingForTeam === "yes",
           skills: parseSkills(skillsInput),
           interest: interest.trim(),
-          vibe: vibe.trim(),
+          vibe: vibe.trim() || undefined,
+          discord_username: discordUsername.trim() || undefined,
+          anonymous_in_matching: anonymousInMatching,
+          show_discord_when_anonymous: showDiscordWhenAnonymous,
         }),
       });
       localStorage.setItem("hb_auth_token", response.token);
@@ -154,9 +168,29 @@ export default function EntryScreen({
                   setHackathonId(e.target.value);
                   setErr("");
                 }}
-                placeholder="Hackathon ID (e.g. jamhacks26)"
+                placeholder="Hackathon (e.g. jamhacks26)"
                 className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
               />
+              <select
+                value={lookingForTeam}
+                onChange={(e) => {
+                  const next = e.target.value as "" | "yes" | "no";
+                  setLookingForTeam(next);
+                  if (next === "no") setAnonymousInMatching(false);
+                  setErr("");
+                }}
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white outline-none transition-all"
+              >
+                <option value="" className="bg-[#0f1012]">
+                  Are you looking for a team?
+                </option>
+                <option value="yes" className="bg-[#0f1012]">
+                  Yes, match me
+                </option>
+                <option value="no" className="bg-[#0f1012]">
+                  No, I already have a team
+                </option>
+              </select>
               <input
                 value={skillsInput}
                 onChange={(e) => {
@@ -181,9 +215,43 @@ export default function EntryScreen({
                   setVibe(e.target.value);
                   setErr("");
                 }}
-                placeholder="Vibe (e.g. chill, competitive, experimental)"
+                placeholder={
+                  lookingForTeam === "yes"
+                    ? "Vibe (required for team matching)"
+                    : "Vibe (optional)"
+                }
                 className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
               />
+              <input
+                value={discordUsername}
+                onChange={(e) => {
+                  setDiscordUsername(e.target.value);
+                  setErr("");
+                }}
+                placeholder="Discord username (optional)"
+                className="bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none transition-all"
+              />
+              {lookingForTeam === "yes" && (
+                <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl px-4 py-3 flex flex-col gap-2">
+                  <label className="text-[13px] text-[#d4d4d8] flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={anonymousInMatching}
+                      onChange={(e) => setAnonymousInMatching(e.target.checked)}
+                    />
+                    Make my app username anonymous in team finding
+                  </label>
+                  <label className="text-[13px] text-[#a1a1aa] flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={showDiscordWhenAnonymous}
+                      onChange={(e) => setShowDiscordWhenAnonymous(e.target.checked)}
+                      disabled={!anonymousInMatching}
+                    />
+                    If anonymous, show Discord username when available
+                  </label>
+                </div>
+              )}
             </>
           )}
 

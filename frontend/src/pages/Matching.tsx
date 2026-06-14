@@ -3,6 +3,9 @@ import { apiFetch } from "../hackbuddyApi";
 import type { OnboardingProfile, ToastFn } from "../hackbuddyTypes";
 
 type TeammatePreview = {
+  display_name?: string;
+  is_anonymous?: boolean;
+  discord_username?: string;
   skills: string[];
   interest: string;
   vibe: string;
@@ -34,6 +37,7 @@ export default function MatchingPage({
   const lobbyRoomId = `lobby:${(profile.hackathonId || "default").trim().toLowerCase()}`;
 
   const enroll = useCallback(async () => {
+    if (!profile.lookingForTeam) return;
     await apiFetch("/api/matchmaking/enroll", {
       method: "POST",
       body: JSON.stringify({
@@ -43,18 +47,39 @@ export default function MatchingPage({
         skills: profile.skills,
         interest: profile.interest,
         vibe: profile.vibe,
+        discord_username: profile.discordUsername || undefined,
+        anonymous_in_matching: profile.anonymousInMatching,
+        show_discord_when_anonymous: profile.showDiscordWhenAnonymous,
       }),
     });
-  }, [lobbyRoomId, profile.hackathonId, profile.interest, profile.name, profile.skills, profile.vibe]);
+  }, [
+    lobbyRoomId,
+    profile.anonymousInMatching,
+    profile.discordUsername,
+    profile.hackathonId,
+    profile.interest,
+    profile.lookingForTeam,
+    profile.name,
+    profile.showDiscordWhenAnonymous,
+    profile.skills,
+    profile.vibe,
+  ]);
 
   const fetchStatus = useCallback(async () => {
+    if (!profile.lookingForTeam) {
+      setStatus({
+        state: "solo",
+        message: "You’re marked as already having a team. Use an invite code to enter your team room.",
+      });
+      return;
+    }
     const response = await apiFetch<MatchStatusResponse>(
       `/api/matchmaking/status?room_id=${encodeURIComponent(lobbyRoomId)}&hackathon_id=${encodeURIComponent(
         profile.hackathonId || "default",
       )}&name=${encodeURIComponent(profile.name)}`,
     );
     setStatus(response);
-  }, [lobbyRoomId, profile.hackathonId, profile.name]);
+  }, [lobbyRoomId, profile.hackathonId, profile.lookingForTeam, profile.name]);
 
   useEffect(() => {
     let mounted = true;
@@ -171,6 +196,7 @@ export default function MatchingPage({
             {(status.teammates || []).map((teammate, index) => (
               <article key={`${index}-${teammate.vibe}`} className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-5">
                 <p className="text-[12px] uppercase tracking-wide text-[#52525b]">Teammate {index + 1}</p>
+                <p className="text-[15px] text-white mt-2">{teammate.display_name || "Teammate"}</p>
                 <p className="text-[14px] text-[#d4d4d8] mt-2">
                   <span className="text-[#71717a]">Skills:</span> {teammate.skills?.join(", ") || "N/A"}
                 </p>

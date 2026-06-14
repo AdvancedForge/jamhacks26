@@ -24,17 +24,25 @@ export interface ChatMessage {
 export type OnboardingProfile = {
   hackathonId: string;
   name: string;
+  lookingForTeam: boolean;
   skills: string[];
   interest: string;
   vibe: string;
+  discordUsername: string;
+  anonymousInMatching: boolean;
+  showDiscordWhenAnonymous: boolean;
 };
 
 export type AuthUser = {
   username: string;
   hackathon_id: string;
+  looking_for_team: boolean;
   skills: string[];
   interest: string;
   vibe: string;
+  discord_username: string;
+  anonymous_in_matching: boolean;
+  show_discord_when_anonymous: boolean;
   room_id?: string | null;
   team_id?: string | null;
   invite_code?: string | null;

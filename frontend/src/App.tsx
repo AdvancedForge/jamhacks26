@@ -12,6 +12,17 @@ import { apiFetch } from "./hackbuddyApi";
 
 import RoadmapPage from "./pages/Roadmap";
 const PROFILE_STORAGE_KEY = "hb_profile";
+const profileFromAuthUser = (user: AuthUser): OnboardingProfile => ({
+  hackathonId: (user.hackathon_id || "").trim(),
+  name: (user.username || "").trim(),
+  lookingForTeam: Boolean(user.looking_for_team),
+  skills: Array.isArray(user.skills) ? user.skills.map((skill) => String(skill).trim()).filter(Boolean) : [],
+  interest: (user.interest || "").trim(),
+  vibe: (user.vibe || "").trim(),
+  discordUsername: (user.discord_username || "").trim(),
+  anonymousInMatching: Boolean(user.anonymous_in_matching),
+  showDiscordWhenAnonymous: Boolean(user.show_discord_when_anonymous),
+});
 
 const readStoredProfile = (): OnboardingProfile | null => {
   try {
@@ -19,15 +30,29 @@ const readStoredProfile = (): OnboardingProfile | null => {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<OnboardingProfile>;
     if (!parsed || typeof parsed !== "object") return null;
-    const hackathonId = typeof parsed.hackathonId === "string" ? parsed.hackathonId.trim() : "default";
+    const hackathonId = typeof parsed.hackathonId === "string" ? parsed.hackathonId.trim() : "";
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
     const interest = typeof parsed.interest === "string" ? parsed.interest.trim() : "";
     const vibe = typeof parsed.vibe === "string" ? parsed.vibe.trim() : "";
+    const lookingForTeam = Boolean(parsed.lookingForTeam);
+    const discordUsername = typeof parsed.discordUsername === "string" ? parsed.discordUsername.trim() : "";
+    const anonymousInMatching = Boolean(parsed.anonymousInMatching);
+    const showDiscordWhenAnonymous = parsed.showDiscordWhenAnonymous !== false;
     const skills = Array.isArray(parsed.skills)
       ? parsed.skills.map((skill) => String(skill).trim()).filter(Boolean)
       : [];
-    if (!name || !interest || !vibe) return null;
-    return { hackathonId: hackathonId || "default", name, interest, vibe, skills };
+    if (!name || !interest || !hackathonId) return null;
+    return {
+      hackathonId,
+      name,
+      lookingForTeam,
+      interest,
+      vibe,
+      skills,
+      discordUsername,
+      anonymousInMatching,
+      showDiscordWhenAnonymous,
+    };
   } catch {
     return null;
   }
@@ -81,6 +106,9 @@ export default function App() {
         if (response.user) {
           setAuthUser(response.user);
           setRoomCode((response.user.room_id || "").toString());
+          const refreshedProfile = profileFromAuthUser(response.user);
+          setProfile(refreshedProfile);
+          localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(refreshedProfile));
           localStorage.setItem("hb_auth_user", JSON.stringify(response.user));
         }
       } catch {

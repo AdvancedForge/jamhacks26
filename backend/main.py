@@ -100,7 +100,10 @@ class DiscordTeam8sPayload(BaseModel):
     name: str
     skills: List[str] = Field(default_factory=list)
     interest: str
-    vibe: str
+    vibe: Optional[str] = None
+    discord_username: Optional[str] = None
+    anonymous_in_matching: bool = False
+    show_discord_when_anonymous: bool = True
     discord_handle: Optional[str] = None
     looking_for: Optional[str] = None
     availability: Optional[str] = None
@@ -114,6 +117,9 @@ class MatchmakingEnrollPayload(BaseModel):
     skills: List[str] = Field(default_factory=list)
     interest: str
     vibe: str
+    discord_username: Optional[str] = None
+    anonymous_in_matching: bool = False
+    show_discord_when_anonymous: bool = True
 
 
 class MatchmakingStatusQuery(BaseModel):
@@ -134,9 +140,13 @@ class SignupPayload(BaseModel):
     username: str
     password: str
     hackathon_id: str = "default"
+    looking_for_team: bool
     skills: List[str] = Field(default_factory=list)
     interest: str
-    vibe: str
+    vibe: Optional[str] = None
+    discord_username: Optional[str] = None
+    anonymous_in_matching: bool = False
+    show_discord_when_anonymous: bool = True
 
 
 class LoginPayload(BaseModel):
@@ -565,6 +575,16 @@ async def _load_team_for_user(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return await db.teams.find_one({"team_id": team_id})
 
 
+def _participant_display_name(participant: Dict[str, Any]) -> str:
+    is_anonymous = bool(participant.get("anonymous_in_matching"))
+    if not is_anonymous:
+        return str(participant.get("name") or "").strip() or "Teammate"
+    discord_username = str(participant.get("discord_username") or "").strip()
+    if bool(participant.get("show_discord_when_anonymous")) and discord_username:
+        return discord_username
+    return "Anonymous teammate"
+
+
 def _tokenize_text(value: str) -> set[str]:
     return {token for token in re.split(r"[^a-z0-9]+", value.lower()) if token}
 
@@ -595,6 +615,9 @@ async def _get_match_participants(room_id: str, hackathon_id: str) -> List[Dict[
                     "skills": participant.get("skills", []),
                     "interest": participant.get("interest", ""),
                     "vibe": participant.get("vibe", ""),
+                    "discord_username": participant.get("discord_username", ""),
+                    "anonymous_in_matching": bool(participant.get("anonymous_in_matching")),
+                    "show_discord_when_anonymous": bool(participant.get("show_discord_when_anonymous", True)),
                     "status": participant.get("status", "searching"),
                     "current_proposal_id": participant.get("current_proposal_id"),
                     "team_id": participant.get("team_id"),
@@ -608,6 +631,9 @@ async def _get_match_participants(room_id: str, hackathon_id: str) -> List[Dict[
             "skills": member.get("skills", []),
             "interest": member.get("interest", ""),
             "vibe": member.get("vibe", ""),
+            "discord_username": "",
+            "anonymous_in_matching": False,
+            "show_discord_when_anonymous": True,
             "status": "searching",
             "current_proposal_id": None,
             "team_id": None,
@@ -1518,14 +1544,21 @@ async def signup(payload: SignupPayload):
     if existing_user:
         raise HTTPException(status_code=409, detail="Username already exists")
     normalized_hackathon_id = _normalize_hackathon_id(payload.hackathon_id)
+    normalized_vibe = " ".join((payload.vibe or "").split()).strip()
+    if payload.looking_for_team and not normalized_vibe:
+        raise HTTPException(status_code=400, detail="vibe is required when looking for a team")
     password_hash = _hash_password(payload.password)
     user_doc = {
         "username": username,
         "password_hash": password_hash,
         "hackathon_id": normalized_hackathon_id,
+        "looking_for_team": bool(payload.looking_for_team),
         "skills": _normalize_skill_list(payload.skills),
         "interest": " ".join((payload.interest or "").split()).strip(),
-        "vibe": " ".join((payload.vibe or "").split()).strip(),
+        "vibe": normalized_vibe,
+        "discord_username": " ".join((payload.discord_username or "").split()).strip(),
+        "anonymous_in_matching": bool(payload.anonymous_in_matching),
+        "show_discord_when_anonymous": bool(payload.show_discord_when_anonymous),
         "team_id": None,
         "room_id": None,
         "invite_code": None,
@@ -1541,30 +1574,42 @@ async def signup(payload: SignupPayload):
             "created_at": int(time.time() * 1000),
         }
     )
-    lobby_room_id = _match_lobby_id(normalized_hackathon_id)
-    await enroll_matchmaking(
-        MatchmakingEnrollPayload(
-            room_id=lobby_room_id,
-            hackathon_id=normalized_hackathon_id,
-            name=username,
-            skills=user_doc["skills"],
-            interest=user_doc["interest"],
-            vibe=user_doc["vibe"],
+    if user_doc["looking_for_team"]:
+        lobby_room_id = _match_lobby_id(normalized_hackathon_id)
+        await enroll_matchmaking(
+            MatchmakingEnrollPayload(
+                room_id=lobby_room_id,
+                hackathon_id=normalized_hackathon_id,
+                name=username,
+                skills=user_doc["skills"],
+                interest=user_doc["interest"],
+                vibe=user_doc["vibe"],
+                discord_username=user_doc["discord_username"],
+                anonymous_in_matching=user_doc["anonymous_in_matching"],
+                show_discord_when_anonymous=user_doc["show_discord_when_anonymous"],
+            )
         )
-    )
     return {
         "ok": True,
         "token": session_token,
         "user": {
             "username": username,
             "hackathon_id": normalized_hackathon_id,
+            "looking_for_team": user_doc["looking_for_team"],
             "skills": user_doc["skills"],
             "interest": user_doc["interest"],
             "vibe": user_doc["vibe"],
+            "discord_username": user_doc["discord_username"],
+            "anonymous_in_matching": user_doc["anonymous_in_matching"],
+            "show_discord_when_anonymous": user_doc["show_discord_when_anonymous"],
             "room_id": None,
             "team_id": None,
         },
-        "message": "Thanks! You'll be matched with a team soon.",
+        "message": (
+            "Thanks! You'll be matched with a team soon."
+            if user_doc["looking_for_team"]
+            else "Account created. Join your team with an invite code when ready."
+        ),
     }
 
 
@@ -1592,9 +1637,13 @@ async def login(payload: LoginPayload):
         "user": {
             "username": user.get("username"),
             "hackathon_id": user.get("hackathon_id") or "default",
+            "looking_for_team": bool(user.get("looking_for_team", True)),
             "skills": user.get("skills", []),
             "interest": user.get("interest", ""),
             "vibe": user.get("vibe", ""),
+            "discord_username": user.get("discord_username", ""),
+            "anonymous_in_matching": bool(user.get("anonymous_in_matching")),
+            "show_discord_when_anonymous": bool(user.get("show_discord_when_anonymous", True)),
             "room_id": user.get("room_id"),
             "team_id": user.get("team_id"),
             "invite_code": user.get("invite_code"),
@@ -1611,9 +1660,13 @@ async def auth_me(x_auth_token: Optional[str] = Header(None)):
         "user": {
             "username": user.get("username"),
             "hackathon_id": user.get("hackathon_id") or "default",
+            "looking_for_team": bool(user.get("looking_for_team", True)),
             "skills": user.get("skills", []),
             "interest": user.get("interest", ""),
             "vibe": user.get("vibe", ""),
+            "discord_username": user.get("discord_username", ""),
+            "anonymous_in_matching": bool(user.get("anonymous_in_matching")),
+            "show_discord_when_anonymous": bool(user.get("show_discord_when_anonymous", True)),
             "room_id": user.get("room_id"),
             "team_id": user.get("team_id"),
             "invite_code": user.get("invite_code") or (team or {}).get("invite_code"),
@@ -1709,6 +1762,9 @@ async def enroll_matchmaking(payload: MatchmakingEnrollPayload):
                     "skills": profile_doc["skills"],
                     "interest": profile_doc["interest"],
                     "vibe": profile_doc["vibe"],
+                    "discord_username": " ".join((payload.discord_username or "").split()).strip(),
+                    "anonymous_in_matching": bool(payload.anonymous_in_matching),
+                    "show_discord_when_anonymous": bool(payload.show_discord_when_anonymous),
                     "status": "searching",
                     "team_id": None,
                     "current_proposal_id": None,
@@ -1769,6 +1825,9 @@ async def get_matchmaking_status(room_id: str, hackathon_id: str = "default", na
             "invite_code": (team_doc or {}).get("invite_code"),
             "teammates": [
                 {
+                    "display_name": _participant_display_name(teammate),
+                    "is_anonymous": bool(teammate.get("anonymous_in_matching")),
+                    "discord_username": teammate.get("discord_username", ""),
                     "skills": teammate.get("skills", []),
                     "interest": teammate.get("interest", ""),
                     "vibe": teammate.get("vibe", ""),
@@ -1804,6 +1863,9 @@ async def get_matchmaking_status(room_id: str, hackathon_id: str = "default", na
                 "proposal_id": proposal_id,
                 "teammates": [
                     {
+                        "display_name": _participant_display_name(teammate),
+                        "is_anonymous": bool(teammate.get("anonymous_in_matching")),
+                        "discord_username": teammate.get("discord_username", ""),
                         "skills": teammate.get("skills", []),
                         "interest": teammate.get("interest", ""),
                         "vibe": teammate.get("vibe", ""),

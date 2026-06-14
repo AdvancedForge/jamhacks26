@@ -63,16 +63,24 @@ export default function IntegrationsPage({
   };
 
   const buildProfile = (): OnboardingProfile => ({
-    hackathonId: profile?.hackathonId || "default",
+    hackathonId: profile?.hackathonId || "",
     name: name.trim(),
+    lookingForTeam: profile?.lookingForTeam ?? true,
     skills: parseSkills(skillsInput),
     interest: interest.trim(),
     vibe: vibe.trim(),
+    discordUsername: profile?.discordUsername || "",
+    anonymousInMatching: profile?.anonymousInMatching ?? false,
+    showDiscordWhenAnonymous: profile?.showDiscordWhenAnonymous ?? true,
   });
 
   const ensureValidProfile = (nextProfile: OnboardingProfile) => {
-    if (!nextProfile.name || !nextProfile.interest || !nextProfile.vibe || nextProfile.skills.length === 0) {
-      toast("Fill Name, Skills, Interest, and Vibe first.", "warn");
+    if (!nextProfile.name || !nextProfile.interest || !nextProfile.hackathonId || nextProfile.skills.length === 0) {
+      toast("Fill Name, Hackathon, Skills, and Interest first.", "warn");
+      return false;
+    }
+    if (nextProfile.lookingForTeam && !nextProfile.vibe) {
+      toast("Vibe is required while you are seeking a team.", "warn");
       return false;
     }
     return true;
@@ -92,17 +100,22 @@ export default function IntegrationsPage({
           vibe: nextProfile.vibe,
         }),
       });
-      await apiFetch("/api/matchmaking/enroll", {
-        method: "POST",
-        body: JSON.stringify({
-          room_id: roomCode,
-          hackathon_id: nextProfile.hackathonId || "default",
-          name: nextProfile.name,
-          skills: nextProfile.skills,
-          interest: nextProfile.interest,
-          vibe: nextProfile.vibe,
-        }),
-      });
+      if (nextProfile.lookingForTeam) {
+        await apiFetch("/api/matchmaking/enroll", {
+          method: "POST",
+          body: JSON.stringify({
+            room_id: roomCode,
+            hackathon_id: nextProfile.hackathonId || "default",
+            name: nextProfile.name,
+            skills: nextProfile.skills,
+            interest: nextProfile.interest,
+            vibe: nextProfile.vibe,
+            discord_username: nextProfile.discordUsername || undefined,
+            anonymous_in_matching: nextProfile.anonymousInMatching,
+            show_discord_when_anonymous: nextProfile.showDiscordWhenAnonymous,
+          }),
+        });
+      }
       localStorage.setItem("hb_profile", JSON.stringify(nextProfile));
       onProfileChange(nextProfile);
       toast("Onboarding profile saved.", "success");
