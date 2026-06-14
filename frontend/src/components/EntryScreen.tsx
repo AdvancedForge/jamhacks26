@@ -171,7 +171,7 @@ export default function EntryScreen({
         method: "POST",
         body: JSON.stringify({ room_id: normalizedRoomCode }),
       });
-      onEnterRoom(normalizedRoomCode, displayName.trim() || "You");
+      onEnterRoom(normalizedRoomCode, "");
     } catch {
       setErr("Room not found. Check the code and try again.");
     } finally {
@@ -303,6 +303,17 @@ export default function EntryScreen({
                   />
                 </>
               )}
+              {mode === "join-room" && (
+                <input
+                  value={roomCodeInput}
+                  onChange={(event) => {
+                    setRoomCodeInput(event.target.value);
+                    setErr("");
+                  }}
+                  placeholder="Room code"
+                  className="rounded-xl border border-white/[0.1] bg-white/[0.03] px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none focus:border-white/[0.2]"
+                />
+              )}
 
               {mode === "signup" && (
                 <>
@@ -373,7 +384,7 @@ export default function EntryScreen({
                 </>
               )}
 
-              {(mode === "create-room" || mode === "join-room") && (
+              {mode === "create-room" && (
                 <>
                   <input
                     value={displayName}
@@ -384,17 +395,6 @@ export default function EntryScreen({
                     placeholder="Display name (optional)"
                     className="rounded-xl border border-white/[0.1] bg-white/[0.03] px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none focus:border-white/[0.2]"
                   />
-                  {mode === "join-room" && (
-                    <input
-                      value={roomCodeInput}
-                      onChange={(event) => {
-                        setRoomCodeInput(event.target.value);
-                        setErr("");
-                      }}
-                      placeholder="Room code"
-                      className="rounded-xl border border-white/[0.1] bg-white/[0.03] px-4 py-3 text-[14px] text-white placeholder-[#52525b] outline-none focus:border-white/[0.2]"
-                    />
-                  )}
                 </>
               )}
 

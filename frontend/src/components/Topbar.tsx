@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type { AppPage } from "../hackbuddyTypes";
-
-const NAV: AppPage[] = ["Roadmap", "Kanban", "Whiteboard", "Integrations"];
+const NAV: Array<{ value: AppPage; label: string }> = [
+  { value: "Roadmap", label: "Roadmap" },
+  { value: "Kanban", label: "Kanban" },
+  { value: "Whiteboard", label: "Whiteboard" },
+  { value: "Integrations", label: "Settings" },
+];
 
 export default function Topbar({
   roomCode,
@@ -50,13 +54,13 @@ export default function Topbar({
       <nav ref={navRef} data-tour="top-nav" className="flex gap-1 bg-white/2 border border-white/4 rounded-lg p-1">
         {NAV.map((nav) => (
           <button
-            key={nav}
-            onClick={() => onNav(nav)}
+            key={nav.value}
+            onClick={() => onNav(nav.value)}
             className={`text-[13px] px-3 py-1.5 rounded-md transition-all ${
-              page === nav ? "bg-white/8 text-white" : "text-[#71717a] hover:text-[#a1a1aa]"
+              page === nav.value ? "bg-white/8 text-white" : "text-[#71717a] hover:text-[#a1a1aa]"
             }`}
           >
-            {nav}
+            {nav.label}
           </button>
         ))}
       </nav>

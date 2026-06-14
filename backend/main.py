@@ -1834,13 +1834,28 @@ async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
     exclude_team_id = user.get("team_id")
     candidate_filter: Dict[str, Any] = {
         "hackathon_id": normalized_hackathon_id,
-        "status": "searching",
-        "name": {"$ne": username},
+        "looking_for_team": True,
+        "username": {"$ne": username},
         "$or": [{"room_id": None}, {"room_id": ""}, {"room_id": {"$exists": False}}],
     }
     if exclude_team_id:
         candidate_filter["team_id"] = {"$ne": exclude_team_id}
-    raw_candidates = await db.match_participants.find(candidate_filter).to_list(length=100)
+    candidate_users = await db.users.find(candidate_filter).to_list(length=200)
+    candidate_payload = []
+    for candidate in candidate_users:
+        candidate_username = str(candidate.get("username") or "").strip()
+        if not candidate_username:
+            continue
+        candidate_payload.append(
+            {
+                "username": candidate_username,
+                "skills": candidate.get("skills", []),
+                "interest": str(candidate.get("interest") or "").strip(),
+                "vibe": str(candidate.get("vibe") or "").strip(),
+                "discord_username": str(candidate.get("discord_username") or "").strip(),
+                "team_id": candidate.get("team_id"),
+            }
+        )
     incoming_invites = await db.match_invites.find(
         {
             "hackathon_id": normalized_hackathon_id,
@@ -1900,7 +1915,7 @@ async def get_matchmaking_status(x_auth_token: Optional[str] = Header(None)):
         "team_id": user.get("team_id"),
         "invite_code": invite_code,
         "teammates": await _load_team_member_profiles(team, username),
-        "candidates": [_participant_summary(candidate) for candidate in raw_candidates],
+        "candidates": candidate_payload,
         "incoming_invites": incoming_payload,
         "outgoing_invites": outgoing_payload,
     }
@@ -1927,6 +1942,11 @@ async def invite_matchmaking_user(
         raise HTTPException(status_code=404, detail="Invitee not found")
     if invitee.get("room_id"):
         raise HTTPException(status_code=409, detail="Invitee is already in a room")
+    if not bool(invitee.get("looking_for_team", True)):
+        raise HTTPException(
+            status_code=409,
+            detail="Invitee is not currently participating in teammatching.",
+        )
     normalized_hackathon_id = _normalize_hackathon_id(inviter.get("hackathon_id") or "default")
     if _normalize_hackathon_id(invitee.get("hackathon_id") or "default") != normalized_hackathon_id:
         raise HTTPException(

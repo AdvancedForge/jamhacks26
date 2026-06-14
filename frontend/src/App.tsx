@@ -21,16 +21,24 @@ type SpotlightStep = {
   target: SpotlightTarget;
   selector?: string;
   advanceOnClickSelector?: string;
+  autoOpenKanbanChat?: boolean;
   autoOpenWhiteboardChat?: boolean;
   page?: AppPage;
   padding?: number;
   title: string;
   description: string;
 };
+const KANBAN_AI_CHAT_TOGGLE_SELECTOR = '[data-tour="kanban-ai-chat-toggle"]';
+const KANBAN_AI_CHAT_PANEL_SELECTOR = '[data-tour="kanban-ai-chat-panel"]';
 const WHITEBOARD_AI_CHAT_TOGGLE_SELECTOR = '[data-tour="whiteboard-ai-chat-toggle"]';
 const WHITEBOARD_AI_CHAT_PANEL_SELECTOR = '[data-tour="whiteboard-ai-chat-panel"]';
 
 const SPOTLIGHT_STEPS: SpotlightStep[] = [
+  {
+    target: "nav",
+    title: "Top bar navigation",
+    description: "Switch between Roadmap, Kanban, Whiteboard, and Settings from these tabs.",
+  },
   {
     target: "selector",
     page: "Roadmap",
@@ -50,10 +58,20 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
   {
     target: "selector",
     page: "Kanban",
-    selector: '[data-tour="kanban-ai-chat-toggle"]',
+    selector: KANBAN_AI_CHAT_TOGGLE_SELECTOR,
+    advanceOnClickSelector: KANBAN_AI_CHAT_TOGGLE_SELECTOR,
     padding: 12,
-    title: "AI section (Kanban chat)",
-    description: "Open the AI chat drawer to brainstorm tasks, summarize progress, and collaborate with model-assisted responses in context.",
+    title: "Kanban AI slider",
+    description: "This is the AI slider for Kanban. Click it to open the right-side AI chat drawer.",
+  },
+  {
+    target: "selector",
+    page: "Kanban",
+    selector: KANBAN_AI_CHAT_PANEL_SELECTOR,
+    autoOpenKanbanChat: true,
+    padding: 10,
+    title: "Kanban AI chat",
+    description: "Use this chat to plan tasks, summarize board progress, and coordinate implementation with AI support.",
   },
   {
     target: "selector",
@@ -86,8 +104,8 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
     page: "Integrations",
     selector: '[data-tour="integrations-workspace"]',
     padding: 10,
-    title: "Integration section",
-    description: "Manage onboarding profile, repo tracking, Discord teammate posts, and API configuration from one collaboration hub.",
+    title: "Settings section",
+    description: "Manage onboarding profile, repo tracking, teammate posting, and API configuration from one settings hub.",
   },
 ];
 
@@ -174,6 +192,7 @@ export default function App() {
 
   const handlePoll = useCallback(() => setPolledAt((current) => current + 1), []);
   const activeWalkthroughStep = useMemo(() => SPOTLIGHT_STEPS[walkthroughStepIndex] || null, [walkthroughStepIndex]);
+  const shouldForceKanbanChatOpen = showDashboardWalkthrough && Boolean(activeWalkthroughStep?.autoOpenKanbanChat);
   const shouldForceWhiteboardChatOpen = showDashboardWalkthrough && Boolean(activeWalkthroughStep?.autoOpenWhiteboardChat);
 
   const handleAuthenticated = (token: string, user: AuthUser, onboardingProfile: OnboardingProfile) => {
@@ -321,9 +340,9 @@ export default function App() {
       if (step.target === "main") return mainSpotlightRef.current;
       if (step.selector) {
         const selectedElement = document.querySelector<HTMLElement>(step.selector);
-        if (selectedElement) return selectedElement;
+        return selectedElement;
       }
-      return mainSpotlightRef.current;
+      return null;
     },
     [],
   );
@@ -341,11 +360,20 @@ export default function App() {
       }
       const rect = targetElement.getBoundingClientRect();
       const padding = activeWalkthroughStep.padding ?? (activeWalkthroughStep.target === "main" ? 10 : 6);
-      setSpotlightRect({
+      const nextRect = {
         top: Math.max(8, rect.top - padding),
         left: Math.max(8, rect.left - padding),
         width: Math.max(0, rect.width + padding * 2),
         height: Math.max(0, rect.height + padding * 2),
+      };
+      setSpotlightRect((currentRect) => {
+        if (!currentRect) return nextRect;
+        const unchanged =
+          Math.abs(currentRect.top - nextRect.top) < 0.5 &&
+          Math.abs(currentRect.left - nextRect.left) < 0.5 &&
+          Math.abs(currentRect.width - nextRect.width) < 0.5 &&
+          Math.abs(currentRect.height - nextRect.height) < 0.5;
+        return unchanged ? currentRect : nextRect;
       });
     };
     const frameId = window.requestAnimationFrame(updateSpotlight);
@@ -434,6 +462,7 @@ export default function App() {
             toast={toast}
             onPoll={handlePoll}
             currentUserName={displayName}
+            tourForceChatOpen={shouldForceKanbanChatOpen}
           />
         )}
         {page === "Whiteboard" && (

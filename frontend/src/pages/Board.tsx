@@ -46,11 +46,13 @@ export default function BoardPage({
   toast,
   onPoll,
   currentUserName,
+  tourForceChatOpen = false,
 }: {
   roomCode: string;
   toast: ToastFn;
   onPoll?: () => void;
   currentUserName?: string;
+  tourForceChatOpen?: boolean;
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [memberNames, setMemberNames] = useState<string[]>([]);
@@ -168,6 +170,10 @@ export default function BoardPage({
   useEffect(() => {
     localStorage.setItem(CHAT_MODEL_STORAGE_KEY, selectedModel);
   }, [selectedModel]);
+  useEffect(() => {
+    if (!tourForceChatOpen) return;
+    setIsChatOpen(true);
+  }, [tourForceChatOpen]);
 
   const fetchChatModels = useCallback(async () => {
     try {
@@ -631,7 +637,7 @@ export default function BoardPage({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isChatOpen ? "M9 5l7 7-7 7" : "M15 19l-7-7 7-7"} />
           </svg>
         </button>
-        <div className="w-80 h-full bg-[#08090a] border-l border-white/[0.04]">
+        <div data-tour="kanban-ai-chat-panel" className="w-80 h-full bg-[#08090a] border-l border-white/[0.04]">
           <ChatWindow
             roomCode={roomCode}
             messages={chatMessages}

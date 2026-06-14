@@ -64,6 +64,7 @@ export default function MatchingPage({
   const [joining, setJoining] = useState(false);
   const [starting, setStarting] = useState(false);
   const [inviteCodeInput, setInviteCodeInput] = useState("");
+  const [inviteUsernameInput, setInviteUsernameInput] = useState("");
 
   const fetchStatus = useCallback(async () => {
     const response = await apiFetch<MatchStatusResponse>("/api/matchmaking/status", {
@@ -125,22 +126,34 @@ export default function MatchingPage({
   }, [fetchStatus, toast]);
 
   const inviteCandidate = async (candidateUsername: string) => {
-    setLoadingInviteId(candidateUsername);
+    const normalizedCandidateUsername = candidateUsername.trim();
+    if (!normalizedCandidateUsername) {
+      toast("Enter a username to invite.", "warn");
+      return false;
+    }
+    setLoadingInviteId(normalizedCandidateUsername);
     try {
       const response = await apiFetch<{ already_pending?: boolean }>("/api/matchmaking/invite", {
         method: "POST",
         headers: { "X-Auth-Token": authToken },
         body: JSON.stringify({
-          invitee_username: candidateUsername,
+          invitee_username: normalizedCandidateUsername,
         }),
       });
       toast(response.already_pending ? "Invite already pending." : "Invite sent.", "success");
       await fetchStatus();
+      return true;
     } catch {
       toast("Failed to send invite.", "warn");
+      return false;
     } finally {
       setLoadingInviteId(null);
     }
+  };
+
+  const inviteByUsername = async () => {
+    const invited = await inviteCandidate(inviteUsernameInput);
+    if (invited) setInviteUsernameInput("");
   };
 
   const respondInvite = async (inviteId: string, accept: boolean) => {
@@ -258,6 +271,28 @@ export default function MatchingPage({
               {joining ? "Joining..." : "Join Team"}
             </button>
           </div>
+        </section>
+
+        <section className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-6">
+          <p className="text-[13px] text-[#71717a] mb-3">Invite by Username</p>
+          <div className="flex gap-3">
+            <input
+              value={inviteUsernameInput}
+              onChange={(event) => setInviteUsernameInput(event.target.value)}
+              placeholder="Username to invite"
+              className="flex-1 bg-white/[0.03] border border-white/[0.06] focus:border-white/[0.15] rounded-xl px-4 py-3 text-[14px] text-white placeholder-[#3f3f46] outline-none transition-all"
+            />
+            <button
+              onClick={() => void inviteByUsername()}
+              disabled={loadingInviteId === inviteUsernameInput.trim()}
+              className="bg-white text-[#09090b] text-[14px] font-medium px-5 py-3 rounded-xl transition-all disabled:opacity-50"
+            >
+              Invite
+            </button>
+          </div>
+          <p className="text-[12px] text-[#71717a] mt-2">
+            Invite any teammate in teammatching by username, even if they are currently offline.
+          </p>
         </section>
 
         {(status.incoming_invites || []).length > 0 && (
