@@ -1257,6 +1257,7 @@ def _generate_custom_provider_reply(
     model_name: str,
     prompt: str,
     system_instruction: Optional[str] = CHAT_SYSTEM_INSTRUCTION,
+    force_json_output: bool = False,
 ) -> str:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1269,9 +1270,22 @@ def _generate_custom_provider_reply(
     payload = {
         "model": model_name,
         "messages": messages,
-        "temperature": 0.4,
+        "temperature": 0.2 if force_json_output else 0.4,
     }
+    if force_json_output:
+        payload["response_format"] = {"type": "json_object"}
+
     response = requests.post(request_url, json=payload, headers=headers, timeout=45)
+    if (
+        force_json_output
+        and not (200 <= response.status_code < 300)
+        and payload.get("response_format") is not None
+    ):
+        retry_payload = dict(payload)
+        retry_payload.pop("response_format", None)
+        response = requests.post(
+            request_url, json=retry_payload, headers=headers, timeout=45
+        )
     if response.status_code < 200 or response.status_code >= 300:
         raise HTTPException(
             status_code=502,
@@ -1294,6 +1308,38 @@ def _generate_custom_provider_reply(
             detail="Custom AI provider response did not include readable text output.",
         )
     return reply
+
+
+async def _generate_json_response_with_model(active_model: Any, payload: Any) -> str:
+    generation_config = {"response_mime_type": "application/json", "temperature": 0.2}
+    try:
+        response = await active_model.generate_content_async(
+            payload, generation_config=generation_config
+        )
+    except TypeError:
+        response = await active_model.generate_content_async(payload)
+    return response.text
+
+
+def _build_board_action_repair_prompt(
+    *, user_message: str, full_prompt: str, raw_output: str
+) -> str:
+    clipped_raw_output = (raw_output or "").strip()
+    if len(clipped_raw_output) > 2000:
+        clipped_raw_output = clipped_raw_output[:1997].rstrip() + "..."
+    return (
+        "Your previous output could not be parsed as valid JSON for board actions.\n"
+        "Recompute the response and return ONLY valid JSON with this exact shape:\n"
+        '{"tasks":[...], "reply":"...", "roadmap": null|{"vision":"...","phases":{...}}}\n'
+        "Rules:\n"
+        "- No markdown fences.\n"
+        "- No bullet points.\n"
+        "- No explanatory prose outside JSON.\n"
+        "- Keep tasks as array, roadmap as null or object, reply as string.\n\n"
+        f"Original user message:\n{user_message}\n\n"
+        f"Original planning prompt/context:\n{full_prompt}\n\n"
+        f"Invalid previous output:\n{clipped_raw_output}\n"
+    )
 
 
 def _enforce_shared_key_rate_limit(room_id: str, sender: str) -> None:
@@ -1761,13 +1807,15 @@ async def send_chat_message(
                         model_name=selected_model,
                         prompt=full_prompt,
                         system_instruction=BOARD_ACTION_SYSTEM_INSTRUCTION,
+                        force_json_output=True,
                     )
                 else:
                     generation_payload: Any = full_prompt
                     if whiteboard_image_part:
                         generation_payload = [full_prompt, whiteboard_image_part]
                     try:
-                        response = await (planner_model or model).generate_content_async(
+                        response_text = await _generate_json_response_with_model(
+                            planner_model or model,
                             generation_payload
                         )
                     except Exception as multimodal_error:
@@ -1778,13 +1826,40 @@ async def send_chat_message(
                             f"{multimodal_error}"
                         )
                         whiteboard_generation_model, _ = _create_whiteboard_models()
-                        response = await whiteboard_generation_model.generate_content_async(
+                        response_text = await _generate_json_response_with_model(
+                            whiteboard_generation_model,
                             generation_payload
                         )
                         ai_model_used = WHITEBOARD_VISION_MODEL
-                    response_text = response.text
 
                 result = _extract_json_object(response_text)
+                if not result:
+                    repair_prompt = _build_board_action_repair_prompt(
+                        user_message=chat.message,
+                        full_prompt=full_prompt,
+                        raw_output=response_text,
+                    )
+                    try:
+                        if use_custom_provider:
+                            repaired_response_text = _generate_custom_provider_reply(
+                                request_url=validated_request_url,
+                                api_key=custom_api_key,
+                                model_name=selected_model,
+                                prompt=repair_prompt,
+                                system_instruction=BOARD_ACTION_SYSTEM_INSTRUCTION,
+                                force_json_output=True,
+                            )
+                        else:
+                            repaired_response_text = await _generate_json_response_with_model(
+                                planner_model or model,
+                                repair_prompt,
+                            )
+                        repaired_result = _extract_json_object(repaired_response_text)
+                        if repaired_result:
+                            result = repaired_result
+                            response_text = repaired_response_text
+                    except Exception as repair_error:
+                        logger.warning(f"Board-action JSON repair pass failed: {repair_error}")
                 operation_issues: List[str] = []
                 applied_changes = False
                 if not result:
