@@ -141,7 +141,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   };
 
   return (
-    <div className="p-6 h-full flex flex-col gap-6">
+    <div data-tour="roadmap-workspace" className="p-6 h-full flex flex-col gap-6">
       <div className="flex justify-between items-center flex-none">
         <h2 className="text-xl font-bold">Roadmap</h2>
       </div>

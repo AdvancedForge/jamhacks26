@@ -20,22 +20,29 @@ type SpotlightTarget = "nav" | "main" | "selector";
 type SpotlightStep = {
   target: SpotlightTarget;
   selector?: string;
+  advanceOnClickSelector?: string;
+  autoOpenWhiteboardChat?: boolean;
   page?: AppPage;
   padding?: number;
   title: string;
   description: string;
 };
+const WHITEBOARD_AI_CHAT_TOGGLE_SELECTOR = '[data-tour="whiteboard-ai-chat-toggle"]';
+const WHITEBOARD_AI_CHAT_PANEL_SELECTOR = '[data-tour="whiteboard-ai-chat-panel"]';
 
 const SPOTLIGHT_STEPS: SpotlightStep[] = [
   {
-    target: "nav",
-    title: "Navigate your workspace",
-    description: "Use these tabs to jump between Kanban, Whiteboard, Integrations, and Roadmap.",
+    target: "selector",
+    page: "Roadmap",
+    selector: '[data-tour="roadmap-workspace"]',
+    padding: 10,
+    title: "Roadmap section",
+    description: "Set project vision, break work into phases, and drag tasks into implementation order so the team ships in sequence.",
   },
   {
     target: "selector",
     page: "Kanban",
-    selector: '[data-tour=\"kanban-board\"]',
+    selector: '[data-tour="kanban-board"]',
     padding: 10,
     title: "Kanban section",
     description: "Plan work in columns, drag tasks across stages, and keep assignments synchronized live for everyone in the room.",
@@ -43,7 +50,7 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
   {
     target: "selector",
     page: "Kanban",
-    selector: '[data-tour=\"kanban-ai-chat-toggle\"]',
+    selector: '[data-tour="kanban-ai-chat-toggle"]',
     padding: 12,
     title: "AI section (Kanban chat)",
     description: "Open the AI chat drawer to brainstorm tasks, summarize progress, and collaborate with model-assisted responses in context.",
@@ -51,23 +58,33 @@ const SPOTLIGHT_STEPS: SpotlightStep[] = [
   {
     target: "selector",
     page: "Whiteboard",
-    selector: '[data-tour=\"whiteboard-canvas\"]',
+    selector: '[data-tour="whiteboard-canvas"]',
     padding: 10,
     title: "Whiteboard section",
-    description: "Sketch architecture and product flows on the shared Excalidraw canvas with continuous sync for your team.",
+    description: "Sketch architecture, UX flows, and APIs on the shared Excalidraw board with live sync across your room.",
   },
   {
     target: "selector",
     page: "Whiteboard",
-    selector: '[data-tour=\"whiteboard-ai-tools\"]',
+    selector: WHITEBOARD_AI_CHAT_TOGGLE_SELECTOR,
+    advanceOnClickSelector: WHITEBOARD_AI_CHAT_TOGGLE_SELECTOR,
+    padding: 12,
+    title: "Whiteboard AI slider",
+    description: "This right-side AI slider works like Kanban. Click it to open the Whiteboard AI chat drawer.",
+  },
+  {
+    target: "selector",
+    page: "Whiteboard",
+    selector: WHITEBOARD_AI_CHAT_PANEL_SELECTOR,
+    autoOpenWhiteboardChat: true,
     padding: 10,
-    title: "AI tools on Whiteboard",
-    description: "Use Generate Code and AI Feedback to turn drawings into implementation ideas and instant critique.",
+    title: "Whiteboard AI chat",
+    description: "Once opened, use this chat to discuss sketches, request implementation guidance, and iterate ideas with AI in context.",
   },
   {
     target: "selector",
     page: "Integrations",
-    selector: '[data-tour=\"integrations-workspace\"]',
+    selector: '[data-tour="integrations-workspace"]',
     padding: 10,
     title: "Integration section",
     description: "Manage onboarding profile, repo tracking, Discord teammate posts, and API configuration from one collaboration hub.",
@@ -157,6 +174,7 @@ export default function App() {
 
   const handlePoll = useCallback(() => setPolledAt((current) => current + 1), []);
   const activeWalkthroughStep = useMemo(() => SPOTLIGHT_STEPS[walkthroughStepIndex] || null, [walkthroughStepIndex]);
+  const shouldForceWhiteboardChatOpen = showDashboardWalkthrough && Boolean(activeWalkthroughStep?.autoOpenWhiteboardChat);
 
   const handleAuthenticated = (token: string, user: AuthUser, onboardingProfile: OnboardingProfile) => {
     setAuthToken(token);
@@ -279,6 +297,23 @@ export default function App() {
     setPage(activeWalkthroughStep.page);
     localStorage.setItem(PAGE_STORAGE_KEY, activeWalkthroughStep.page);
   }, [activeWalkthroughStep, page, showDashboardWalkthrough]);
+  useEffect(() => {
+    if (!showDashboardWalkthrough || !activeWalkthroughStep?.advanceOnClickSelector) return;
+    const clickableSelector = activeWalkthroughStep.advanceOnClickSelector;
+    const advanceStep = () => {
+      setWalkthroughStepIndex((currentStep) => Math.min(currentStep + 1, SPOTLIGHT_STEPS.length - 1));
+    };
+    const handleClick = (event: MouseEvent) => {
+      const eventTarget = event.target;
+      if (!(eventTarget instanceof Element)) return;
+      if (!eventTarget.closest(clickableSelector)) return;
+      window.setTimeout(advanceStep, 140);
+    };
+    document.addEventListener("click", handleClick);
+    return () => {
+      document.removeEventListener("click", handleClick);
+    };
+  }, [activeWalkthroughStep, showDashboardWalkthrough]);
 
   const getSpotlightTarget = useCallback(
     (step: SpotlightStep) => {
@@ -314,10 +349,12 @@ export default function App() {
       });
     };
     const frameId = window.requestAnimationFrame(updateSpotlight);
+    const refreshInterval = window.setInterval(updateSpotlight, 180);
     window.addEventListener("resize", updateSpotlight);
     window.addEventListener("scroll", updateSpotlight, true);
     return () => {
       window.cancelAnimationFrame(frameId);
+      window.clearInterval(refreshInterval);
       window.removeEventListener("resize", updateSpotlight);
       window.removeEventListener("scroll", updateSpotlight, true);
     };
@@ -399,7 +436,9 @@ export default function App() {
             currentUserName={displayName}
           />
         )}
-        {page === "Whiteboard" && <WhiteboardPage roomCode={roomCode} toast={toast} />}
+        {page === "Whiteboard" && (
+          <WhiteboardPage roomCode={roomCode} toast={toast} tourForceChatOpen={shouldForceWhiteboardChatOpen} />
+        )}
         {page === "Integrations" && (
           <IntegrationsPage
             roomCode={roomCode}

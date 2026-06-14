@@ -27,7 +27,15 @@ const formatModelLabel = (modelName: string) =>
       return segment[0].toUpperCase() + segment.slice(1);
     })
     .join(" ");
-export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; toast: ToastFn }) {
+export default function WhiteboardPage({
+  roomCode,
+  toast,
+  tourForceChatOpen = false,
+}: {
+  roomCode: string;
+  toast: ToastFn;
+  tourForceChatOpen?: boolean;
+}) {
   type SceneElement = Record<string, unknown>;
   type SceneFiles = Record<string, unknown>;
   type SceneState = { elements: SceneElement[]; files: SceneFiles };
@@ -116,6 +124,10 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
   useEffect(() => {
     localStorage.setItem(CHAT_MODEL_STORAGE_KEY, selectedModel);
   }, [selectedModel]);
+  useEffect(() => {
+    if (!tourForceChatOpen) return;
+    setIsChatOpen(true);
+  }, [tourForceChatOpen]);
   const blobToDataUrl = useCallback((blob: Blob) => {
     return new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -667,13 +679,14 @@ export default function WhiteboardPage({ roomCode, toast }: { roomCode: string; 
         <div className={`fixed top-0 right-0 h-full w-80 z-50 transition-transform duration-300 ease-in-out ${isChatOpen ? 'translate-x-0' : 'translate-x-full'}`}>
             <button
                 onClick={() => setIsChatOpen(!isChatOpen)}
+                data-tour="whiteboard-ai-chat-toggle"
                 className="absolute -left-10 top-1/2 -mt-5 p-2 bg-[#08090a] border border-white/[0.06] rounded-l-xl text-gray-400 hover:text-white"
             >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isChatOpen ? "M9 5l7 7-7 7" : "M15 19l-7-7 7-7"} />
                 </svg>
             </button>
-            <div className="w-80 h-full border-l border-white/[0.04] bg-[#08090a]">
+            <div data-tour="whiteboard-ai-chat-panel" className="w-80 h-full border-l border-white/[0.04] bg-[#08090a]">
                 {isChatOpen && (
                   <ChatWindow
                     roomCode={roomCode}
