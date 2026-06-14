@@ -22,6 +22,36 @@ type ChatModelOption = {
   value: string;
   label: string;
 };
+type RoadmapDocument = {
+  projectReadme: string;
+  phases: Record<string, string[]>;
+};
+
+const normalizeRoadmap = (value: unknown): RoadmapDocument => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { projectReadme: "", phases: {} };
+  }
+  const rawRoadmap = value as Record<string, unknown>;
+  const projectReadmeCandidate =
+    typeof rawRoadmap.project_readme === "string"
+      ? rawRoadmap.project_readme
+      : typeof rawRoadmap.vision === "string"
+        ? rawRoadmap.vision
+        : "";
+  const phasesCandidate = rawRoadmap.phases;
+  return {
+    projectReadme: projectReadmeCandidate,
+    phases:
+      phasesCandidate && typeof phasesCandidate === "object" && !Array.isArray(phasesCandidate)
+        ? (phasesCandidate as Record<string, string[]>)
+        : {},
+  };
+};
+
+const serializeRoadmap = (roadmap: RoadmapDocument) => ({
+  project_readme: roadmap.projectReadme,
+  phases: roadmap.phases,
+});
 
 const formatModelLabel = (modelName: string) =>
   modelName
@@ -52,10 +82,10 @@ function PhaseContainer({ id, children }: { id: string; children: React.ReactNod
 }
 
 export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toast: ToastFn }) {
-  const [roadmap, setRoadmap] = useState<{ vision: string; phases: Record<string, string[]> }>({ vision: "", phases: {} });
+  const [roadmap, setRoadmap] = useState<RoadmapDocument>({ projectReadme: "", phases: {} });
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isEditingVision, setIsEditingVision] = useState(false);
+  const [isEditingProjectReadme, setIsEditingProjectReadme] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -66,8 +96,8 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>(
     DEFAULT_CHAT_MODELS.map((modelName) => ({ value: modelName, label: formatModelLabel(modelName) })),
   );
-  const [selectedVisionText, setSelectedVisionText] = useState("");
-  const visionPreviewRef = useRef<HTMLDivElement>(null);
+  const [selectedReadmeText, setSelectedReadmeText] = useState("");
+  const readmePreviewRef = useRef<HTMLDivElement>(null);
   const chatSendInFlightRef = useRef(false);
 
   const mergeChatMessages = useCallback((currentMessages: ChatMessage[], incomingMessages: ChatMessage[]) => {
@@ -125,14 +155,8 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
         void apiFetch<{ roadmap: string; tasks: Task[] }>(`/api/board/${roomCode}`)
           .then((data) => {
             try {
-              const parsedRoadmap = data.roadmap ? JSON.parse(data.roadmap) : { vision: "", phases: {} };
-              setRoadmap({
-                vision: typeof parsedRoadmap.vision === "string" ? parsedRoadmap.vision : "",
-                phases:
-                  parsedRoadmap.phases && typeof parsedRoadmap.phases === "object"
-                    ? parsedRoadmap.phases
-                    : {},
-              });
+              const parsedRoadmap = data.roadmap ? JSON.parse(data.roadmap) : null;
+              setRoadmap(normalizeRoadmap(parsedRoadmap));
             } catch {
               // Ignore malformed roadmap updates.
             }
@@ -146,15 +170,9 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
         return;
       }
       try {
-        const parsedRoadmap = JSON.parse(rawRoadmap) as { vision: string; phases: Record<string, string[]> };
+        const parsedRoadmap = JSON.parse(rawRoadmap);
         if (parsedRoadmap && typeof parsedRoadmap === "object") {
-          setRoadmap({
-            vision: typeof parsedRoadmap.vision === "string" ? parsedRoadmap.vision : "",
-            phases:
-              parsedRoadmap.phases && typeof parsedRoadmap.phases === "object"
-                ? parsedRoadmap.phases
-                : {},
-          });
+          setRoadmap(normalizeRoadmap(parsedRoadmap));
           return;
         }
       } catch {
@@ -169,17 +187,16 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   const fetchData = useCallback(async () => {
     try {
       const data = await apiFetch<{ roadmap: string; tasks: Task[] }>(`/api/board/${roomCode}`);
-      let parsedRoadmap = { vision: "Add vision here...", phases: {} };
+      let parsedRoadmap: RoadmapDocument = { projectReadme: "Add project README here...", phases: {} };
       if (data.roadmap) {
         try {
-          const parsed = JSON.parse(data.roadmap);
-          parsedRoadmap = {
-            vision: parsed.vision || "Add vision here...",
-            phases: parsed.phases || {},
-          };
+          parsedRoadmap = normalizeRoadmap(JSON.parse(data.roadmap));
+          if (!parsedRoadmap.projectReadme) {
+            parsedRoadmap.projectReadme = "Add project README here...";
+          }
         } catch (error) {
           console.error("Failed to parse roadmap JSON, treating as raw text", error);
-          parsedRoadmap = { vision: data.roadmap, phases: {} };
+          parsedRoadmap = { projectReadme: data.roadmap, phases: {} };
         }
       }
       setRoadmap(parsedRoadmap);
@@ -192,9 +209,12 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
 
   const fetchChatModels = useCallback(async () => {
     try {
-      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`, {
-        headers: getAiHeaders(),
-      });
+      const data = await apiFetch<{ models?: string[]; default_model?: string }>(
+        `/api/chat/models?room_id=${encodeURIComponent(roomCode)}`,
+        {
+          headers: getAiHeaders(),
+        },
+      );
       const modelNames = (data.models || []).filter((modelName) => modelName.trim().length > 0);
       if (modelNames.length === 0) return;
       const options = modelNames.map((modelName) => ({ value: modelName, label: formatModelLabel(modelName) }));
@@ -264,17 +284,17 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
   }, []);
 
   useEffect(() => {
-    if (!isEditingVision && visionPreviewRef.current && (window as any).marked) {
-      visionPreviewRef.current.innerHTML = (window as any).marked.parse(roadmap.vision);
+    if (!isEditingProjectReadme && readmePreviewRef.current && (window as any).marked) {
+      readmePreviewRef.current.innerHTML = (window as any).marked.parse(roadmap.projectReadme);
     }
-  }, [isEditingVision, roadmap.vision]);
+  }, [isEditingProjectReadme, roadmap.projectReadme]);
 
   const saveRoadmap = async (nextRoadmap: typeof roadmap) => {
     setRoadmap(nextRoadmap);
     try {
       await apiFetch(`/api/roadmap/${roomCode}`, {
         method: "PUT",
-        body: JSON.stringify({ roadmap: JSON.stringify(nextRoadmap) }),
+        body: JSON.stringify({ roadmap: JSON.stringify(serializeRoadmap(nextRoadmap)) }),
       });
     } catch {
       toast("Failed to save roadmap.", "error");
@@ -324,20 +344,20 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
     saveRoadmap(nextRoadmap);
   };
 
-  const handleVisionSelection = useCallback(() => {
-    if (isEditingVision || !visionPreviewRef.current) return;
+  const handleReadmeSelection = useCallback(() => {
+    if (isEditingProjectReadme || !readmePreviewRef.current) return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const selectedText = selection.toString().replace(/\s+/g, " ").trim();
     if (!selectedText) return;
     const range = selection.getRangeAt(0);
-    if (!visionPreviewRef.current.contains(range.commonAncestorContainer)) return;
-    setSelectedVisionText(selectedText.slice(0, 1200));
+    if (!readmePreviewRef.current.contains(range.commonAncestorContainer)) return;
+    setSelectedReadmeText(selectedText.slice(0, 1200));
     setIsChatOpen(true);
-  }, [isEditingVision]);
+  }, [isEditingProjectReadme]);
 
   const clearSelectionContext = () => {
-    setSelectedVisionText("");
+    setSelectedReadmeText("");
     const selection = window.getSelection();
     selection?.removeAllRanges();
   };
@@ -382,7 +402,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
           message,
           client_nonce: clientNonce,
           model: selectedModel,
-          ...(selectedVisionText ? { roadmap_selection: selectedVisionText } : {}),
+          ...(selectedReadmeText ? { roadmap_selection: selectedReadmeText } : {}),
         }),
       });
       if (response.ok === false || response.saved === false) {
@@ -420,18 +440,18 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
           <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
             <div className="lg:w-1/2 h-full min-h-[280px] bg-[#0a0b0d] border border-white/10 rounded-lg text-white p-4 flex flex-col">
               <div className="flex justify-between items-center mb-4 flex-none">
-                <h3 className="font-bold">Project Vision (Markdown)</h3>
+                <h3 className="font-bold">Project README (Markdown)</h3>
                 <button
-                  onClick={() => setIsEditingVision(!isEditingVision)}
+                  onClick={() => setIsEditingProjectReadme(!isEditingProjectReadme)}
                   className="px-2 py-1 bg-white/10 hover:bg-white/20 rounded text-xs transition-all"
                 >
-                  {isEditingVision ? "Save" : "Edit"}
+                  {isEditingProjectReadme ? "Save" : "Edit"}
                 </button>
               </div>
-              {!isEditingVision && selectedVisionText && (
+              {!isEditingProjectReadme && selectedReadmeText && (
                 <div className="mb-3 border border-blue-500/50 bg-blue-500/[0.08] rounded-lg p-3 text-[12px] text-[#dbeafe]">
                   <p className="font-medium">Selection ready for HackBuddy chat</p>
-                  <p className="mt-1 max-h-16 overflow-y-auto text-[#bfdbfe]">{selectedVisionText}</p>
+                  <p className="mt-1 max-h-16 overflow-y-auto text-[#bfdbfe]">{selectedReadmeText}</p>
                   <div className="mt-2 flex gap-2">
                     <button
                       onClick={() => sendBrainstormPrompt("Can you help improve and refine this selected roadmap section?")}
@@ -449,19 +469,19 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
                 </div>
               )}
               <div className="flex-1 overflow-hidden relative">
-                {isEditingVision ? (
+                {isEditingProjectReadme ? (
                   <textarea
                     className="w-full h-full bg-transparent outline-none resize-none overflow-y-auto"
-                    value={roadmap.vision}
-                    placeholder="Describe your project vision in detail using markdown..."
-                    onChange={(event) => saveRoadmap({ ...roadmap, vision: event.target.value })}
+                    value={roadmap.projectReadme}
+                    placeholder="Describe your project README in detail using markdown..."
+                    onChange={(event) => saveRoadmap({ ...roadmap, projectReadme: event.target.value })}
                   />
                 ) : (
                   <div
-                    ref={visionPreviewRef}
-                    onMouseUp={handleVisionSelection}
-                    onKeyUp={handleVisionSelection}
-                    onTouchEnd={handleVisionSelection}
+                    ref={readmePreviewRef}
+                    onMouseUp={handleReadmeSelection}
+                    onKeyUp={handleReadmeSelection}
+                    onTouchEnd={handleReadmeSelection}
                     className="prose prose-invert max-w-none h-full overflow-y-auto"
                   />
                 )}
@@ -558,7 +578,7 @@ export default function RoadmapPage({ roomCode, toast }: { roomCode: string; toa
                 De-risk plan
               </button>
             </div>
-            {selectedVisionText && (
+            {selectedReadmeText && (
               <p className="mt-2 text-[11px] text-[#93c5fd]">
                 Selected text context is attached to your roadmap chat messages.
               </p>

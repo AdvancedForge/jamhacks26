@@ -1,7 +1,7 @@
 export type AiProviderPreset = "gemini" | "openai" | "openrouter" | "groq" | "custom";
 
 export type AiConfig = {
-  apiKey: string;
+  apiKey?: string;
   requestUrl: string;
   models: string[];
   providerPreset: AiProviderPreset;
@@ -93,7 +93,7 @@ export const readAiConfig = (): AiConfig | null => {
     const models = Array.isArray(parsed.models)
       ? parsed.models.map((item) => String(item).trim()).filter(Boolean)
       : [];
-    if (!apiKey || !requestUrl || models.length === 0) return null;
+    if (!apiKey && !requestUrl && models.length === 0) return null;
     return { apiKey, requestUrl, models, providerPreset };
   } catch {
     return null;
@@ -113,9 +113,9 @@ export const clearAiConfig = (): void => {
 export const getAiHeaders = (): Record<string, string> => {
   const config = readAiConfig();
   if (!config) return {};
-  return {
-    "X-AI-API-Key": config.apiKey,
-    "X-AI-Request-URL": config.requestUrl,
-    "X-AI-Models": config.models.join(","),
-  };
+  const headers: Record<string, string> = {};
+  if (config.apiKey?.trim()) headers["X-AI-API-Key"] = config.apiKey.trim();
+  if (config.requestUrl?.trim()) headers["X-AI-Request-URL"] = config.requestUrl.trim();
+  if (config.models.length > 0) headers["X-AI-Models"] = config.models.join(",");
+  return headers;
 };

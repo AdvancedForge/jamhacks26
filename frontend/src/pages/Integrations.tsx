@@ -17,6 +17,16 @@ type IdeaSuggestion = {
   pitch: string;
   fit: string;
 };
+type RoomAiConfigResponse = {
+  ok?: boolean;
+  config?: {
+    configured?: boolean;
+    has_api_key?: boolean;
+    request_url?: string;
+    models?: string[];
+    provider_preset?: string;
+  };
+};
 
 const toSkillsInput = (profile: OnboardingProfile | null) => (profile?.skills || []).join(", ");
 
@@ -53,6 +63,8 @@ export default function IntegrationsPage({
   const [modelsInput, setModelsInput] = useState(
     stringifyModelList(existingAiConfig?.models || DEFAULT_CHAT_MODELS),
   );
+  const [isAiConfigLoading, setIsAiConfigLoading] = useState(true);
+  const [isBackendAiConfigSaved, setIsBackendAiConfigSaved] = useState(false);
 
   useEffect(() => {
     setName(profile?.name || "");
@@ -60,6 +72,58 @@ export default function IntegrationsPage({
     setInterest(profile?.interest || "");
     setVibe(profile?.vibe || "");
   }, [profile]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadBackendAiConfig = async () => {
+      if (!roomCode) {
+        if (!cancelled) {
+          setIsAiConfigLoading(false);
+          setIsBackendAiConfigSaved(false);
+        }
+        return;
+      }
+      setIsAiConfigLoading(true);
+      try {
+        const response = await apiFetch<RoomAiConfigResponse>(
+          `/api/ai-config/${encodeURIComponent(roomCode)}`,
+        );
+        if (cancelled) return;
+        const config = response.config;
+        setIsBackendAiConfigSaved(Boolean(config?.has_api_key));
+        if (!config?.configured) return;
+        if (typeof config.request_url === "string" && config.request_url.trim()) {
+          setRequestUrl(config.request_url.trim());
+        }
+        if (Array.isArray(config.models) && config.models.length > 0) {
+          setModelsInput(
+            stringifyModelList(
+              config.models.map((modelName) => String(modelName).trim()).filter(Boolean),
+            ),
+          );
+        }
+        const preset = config.provider_preset;
+        if (
+          preset === "gemini" ||
+          preset === "openai" ||
+          preset === "openrouter" ||
+          preset === "groq" ||
+          preset === "custom"
+        ) {
+          setProviderPreset(preset);
+        }
+        setApiKey("");
+      } catch {
+        if (!cancelled) setIsBackendAiConfigSaved(false);
+      } finally {
+        if (!cancelled) setIsAiConfigLoading(false);
+      }
+    };
+    void loadBackendAiConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [roomCode]);
 
   const buildProfile = (): OnboardingProfile => ({
     hackathonId: profile?.hackathonId || "",
@@ -141,8 +205,12 @@ export default function IntegrationsPage({
     }
   };
 
-  const saveAiProviderConfig = () => {
+  const saveAiProviderConfig = async () => {
     const models = parseModelList(modelsInput);
+    if (!roomCode) {
+      toast("Join a room before saving AI config.", "warn");
+      return;
+    }
     if (!apiKey.trim()) {
       toast("Enter an API key to enable custom AI provider routing.", "warn");
       return;
@@ -159,21 +227,46 @@ export default function IntegrationsPage({
       toast("Provide at least one model name.", "warn");
       return;
     }
-    saveAiConfig({
-      apiKey: apiKey.trim(),
-      requestUrl: requestUrl.trim(),
-      models,
-      providerPreset,
-    });
-    toast("Custom AI provider saved for this browser session.", "success");
+    try {
+      await apiFetch(`/api/ai-config/${encodeURIComponent(roomCode)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          api_key: apiKey.trim(),
+          request_url: requestUrl.trim(),
+          models,
+          provider_preset: providerPreset,
+        }),
+      });
+      saveAiConfig({
+        apiKey: "",
+        requestUrl: requestUrl.trim(),
+        models,
+        providerPreset,
+      });
+      setApiKey("");
+      setIsBackendAiConfigSaved(true);
+      toast("Custom AI provider saved on backend for this room.", "success");
+    } catch {
+      toast("Couldn't save custom AI config to backend.", "error");
+    }
   };
 
-  const clearAiProviderConfig = () => {
+  const clearAiProviderConfig = async () => {
+    if (roomCode) {
+      try {
+        await apiFetch(`/api/ai-config/${encodeURIComponent(roomCode)}`, {
+          method: "DELETE",
+        });
+      } catch {
+        // Ignore backend clear failures and still clear local session overrides.
+      }
+    }
     clearAiConfig();
     setApiKey("");
     setProviderPreset("gemini");
     setRequestUrl(AI_PROVIDER_PRESETS[0].requestUrl);
     setModelsInput(stringifyModelList(DEFAULT_CHAT_MODELS));
+    setIsBackendAiConfigSaved(false);
     toast("Custom AI provider cleared. Shared backend key limits now apply.", "warn");
   };
 
@@ -240,9 +333,12 @@ export default function IntegrationsPage({
         </section>
 
         <section>
-          <h2 className="text-[18px] font-semibold text-white mb-2">Custom AI provider (secure session)</h2>
+          <h2 className="text-[18px] font-semibold text-white mb-2">Custom AI provider (backend-secured)</h2>
           <p className="text-[14px] text-[#52525b] mb-5 leading-relaxed">
-            Bring your own key and endpoint. Config is stored only in this browser session (sessionStorage), not localStorage.
+            Bring your own key and endpoint. The API key is stored on the backend per room and is not returned to the browser after save.
+          </p>
+          <p className="text-[12px] text-[#71717a] mb-4">
+            Backend key status: {isAiConfigLoading ? "Checking..." : isBackendAiConfigSaved ? "Saved" : "Not saved"}
           </p>
           <div className="bg-[#0f1012]/80 border border-white/[0.06] rounded-2xl p-5 flex flex-col gap-3">
             <label className="text-[12px] text-[#a1a1aa]">Provider preset</label>

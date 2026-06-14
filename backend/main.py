@@ -13,7 +13,7 @@ import requests
 
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import (FastAPI, HTTPException, Header, Request, WebSocket,
+from fastapi import (FastAPI, HTTPException, Header, Query, Request, WebSocket,
                      WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
 from fastapi.responses import JSONResponse
@@ -42,6 +42,7 @@ db = client.hackbuddy
 mock_whiteboards: Dict[str, Dict[str, Any]] = {}
 mock_whiteboard_jobs: Dict[str, Dict[str, Any]] = {}
 mock_profiles: Dict[str, Dict[str, Dict[str, Any]]] = {}
+mock_ai_configs: Dict[str, Dict[str, Any]] = {}
 
 
 # Helper to check if DB is connected
@@ -1088,6 +1089,13 @@ class ChatMessage(BaseModel):
     whiteboard_image_mime_type: Optional[str] = None
 
 
+class AiProviderConfigPayload(BaseModel):
+    api_key: str
+    request_url: str
+    models: List[str] = Field(default_factory=list)
+    provider_preset: Optional[str] = None
+
+
 import base64
 
 import google.generativeai as genai
@@ -1120,7 +1128,7 @@ BOARD_ACTION_SYSTEM_INSTRUCTION = (
     "Always return ONLY a valid JSON object with keys: tasks, reply, roadmap. "
     "\"tasks\" must be an array of task objects. Include \"id\" only when updating an existing task. "
     "\"reply\" must be concise user-facing text. "
-    "\"roadmap\" must be either null or an object with keys \"vision\" and \"phases\". "
+    "\"roadmap\" must be either null or an object with keys \"project_readme\" and \"phases\". "
     "Never wrap the JSON in markdown fences and never include extra commentary."
 )
 model = genai.GenerativeModel(DEFAULT_CHAT_MODEL)
@@ -1192,6 +1200,91 @@ def _parse_model_list(raw_models: Optional[str]) -> List[str]:
         seen.add(key)
         unique_models.append(token)
     return unique_models
+
+
+def _sanitize_provider_preset(raw_provider_preset: Optional[str]) -> str:
+    candidate = (raw_provider_preset or "").strip().lower()
+    if candidate in {"gemini", "openai", "openrouter", "groq", "custom"}:
+        return candidate
+    return "custom"
+
+
+def _normalize_room_id(room_id: str) -> str:
+    return (room_id or "").strip().upper()
+
+
+def _public_ai_config_response(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not config:
+        return {
+            "configured": False,
+            "has_api_key": False,
+            "request_url": "",
+            "models": [],
+            "provider_preset": "custom",
+        }
+    return {
+        "configured": True,
+        "has_api_key": bool(config.get("api_key")),
+        "request_url": str(config.get("request_url") or "").strip(),
+        "models": _parse_model_list(",".join(config.get("models") or [])),
+        "provider_preset": _sanitize_provider_preset(
+            config.get("provider_preset") or "custom"
+        ),
+    }
+
+
+async def _get_room_ai_config(room_id: str) -> Optional[Dict[str, Any]]:
+    normalized_room_id = _normalize_room_id(room_id)
+    if not normalized_room_id:
+        return None
+    if await is_db_connected():
+        config_doc = await db.ai_provider_configs.find_one({"room_id": normalized_room_id})
+        if not config_doc:
+            return None
+        return {
+            "room_id": normalized_room_id,
+            "api_key": str(config_doc.get("api_key") or "").strip(),
+            "request_url": str(config_doc.get("request_url") or "").strip(),
+            "models": _parse_model_list(",".join(config_doc.get("models") or [])),
+            "provider_preset": _sanitize_provider_preset(
+                config_doc.get("provider_preset") or "custom"
+            ),
+        }
+    cached_config = mock_ai_configs.get(normalized_room_id)
+    if not cached_config:
+        return None
+    return {
+        "room_id": normalized_room_id,
+        "api_key": str(cached_config.get("api_key") or "").strip(),
+        "request_url": str(cached_config.get("request_url") or "").strip(),
+        "models": _parse_model_list(",".join(cached_config.get("models") or [])),
+        "provider_preset": _sanitize_provider_preset(
+            cached_config.get("provider_preset") or "custom"
+        ),
+    }
+
+
+def _validated_ai_config_payload(
+    room_id: str, payload: AiProviderConfigPayload
+) -> Dict[str, Any]:
+    normalized_room_id = _normalize_room_id(room_id)
+    if not normalized_room_id:
+        raise HTTPException(status_code=400, detail="room_id is required")
+    api_key = (payload.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key is required")
+    request_url = _validate_custom_request_url(payload.request_url)
+    models = _parse_model_list(",".join(payload.models or []))
+    if not models:
+        raise HTTPException(status_code=400, detail="at least one model is required")
+    return {
+        "room_id": normalized_room_id,
+        "api_key": api_key,
+        "request_url": request_url,
+        "models": models,
+        "provider_preset": _sanitize_provider_preset(payload.provider_preset),
+        "updated_at": int(time.time() * 1000),
+    }
 
 
 def _resolve_custom_model_name(
@@ -1330,7 +1423,7 @@ def _build_board_action_repair_prompt(
     return (
         "Your previous output could not be parsed as valid JSON for board actions.\n"
         "Recompute the response and return ONLY valid JSON with this exact shape:\n"
-        '{"tasks":[...], "reply":"...", "roadmap": null|{"vision":"...","phases":{...}}}\n'
+        '{"tasks":[...], "reply":"...", "roadmap": null|{"project_readme":"...","phases":{...}}}\n'
         "Rules:\n"
         "- No markdown fences.\n"
         "- No bullet points.\n"
@@ -1592,11 +1685,55 @@ def _summarize_operation_issues(
 
 
 # --- Chat Endpoints ---
+@app.get("/api/ai-config/{room_id}")
+async def get_room_ai_config(room_id: str):
+    config = await _get_room_ai_config(room_id)
+    return {"ok": True, "config": _public_ai_config_response(config)}
+
+
+@app.put("/api/ai-config/{room_id}")
+async def save_room_ai_config(room_id: str, payload: AiProviderConfigPayload):
+    config_doc = _validated_ai_config_payload(room_id, payload)
+    if await is_db_connected():
+        await db.ai_provider_configs.update_one(
+            {"room_id": config_doc["room_id"]},
+            {"$set": config_doc},
+            upsert=True,
+        )
+    else:
+        mock_ai_configs[config_doc["room_id"]] = config_doc
+    return {"ok": True, "config": _public_ai_config_response(config_doc)}
+
+
+@app.delete("/api/ai-config/{room_id}")
+async def clear_room_ai_config(room_id: str):
+    normalized_room_id = _normalize_room_id(room_id)
+    if not normalized_room_id:
+        raise HTTPException(status_code=400, detail="room_id is required")
+    deleted = False
+    if await is_db_connected():
+        delete_result = await db.ai_provider_configs.delete_one(
+            {"room_id": normalized_room_id}
+        )
+        deleted = bool(delete_result.deleted_count)
+    else:
+        deleted = mock_ai_configs.pop(normalized_room_id, None) is not None
+    return {"ok": True, "deleted": deleted}
+
+
 @app.get("/api/chat/models")
-async def get_chat_models(x_ai_models: Optional[str] = Header(None)):
+async def get_chat_models(
+    room_id: Optional[str] = Query(None), x_ai_models: Optional[str] = Header(None)
+):
     custom_models = _parse_model_list(x_ai_models)
     if custom_models:
         return {"models": custom_models, "default_model": custom_models[0]}
+    if room_id:
+        config = await _get_room_ai_config(room_id)
+        if config and config.get("models"):
+            model_list = _parse_model_list(",".join(config.get("models") or []))
+            if model_list:
+                return {"models": model_list, "default_model": model_list[0]}
     return {"models": SUPPORTED_CHAT_MODELS, "default_model": DEFAULT_CHAT_MODEL}
 
 
@@ -1659,6 +1796,18 @@ async def send_chat_message(
         custom_models = _parse_model_list(x_ai_models)
         custom_api_key = (x_ai_api_key or "").strip()
         custom_request_url = (x_ai_request_url or "").strip()
+        saved_ai_config = await _get_room_ai_config(chat.room_id)
+        if saved_ai_config:
+            if not custom_api_key:
+                custom_api_key = str(saved_ai_config.get("api_key") or "").strip()
+            if not custom_request_url:
+                custom_request_url = str(
+                    saved_ai_config.get("request_url") or ""
+                ).strip()
+            if not custom_models:
+                custom_models = _parse_model_list(
+                    ",".join(saved_ai_config.get("models") or [])
+                )
         use_custom_provider = bool(custom_api_key and custom_request_url)
         if use_custom_provider:
             selected_model = _resolve_custom_model_name(
@@ -1801,10 +1950,11 @@ async def send_chat_message(
                 prompt = (
                     "You are HackBuddy AI's board-action engine. "
                     "Read the context and return STRICT JSON only, with no markdown fences and no extra text. "
-                    'Required JSON schema: {"tasks": [...], "reply": "...", "roadmap": null|{"vision":"...","phases":{...}}}. '
+                    'Required JSON schema: {"tasks": [...], "reply": "...", "roadmap": null|{"project_readme":"...","phases":{...}}}. '
                     '"tasks" must be ONLY new tasks to create or existing tasks to update (updates must include "id"). '
                     'If no task changes are needed, return "tasks": []. '
                     '"roadmap" must be null unless the user explicitly requested roadmap changes. '
+                    '"project_readme" must be a detailed Markdown README-style document (not a one-line vision statement). '
                     '"reply" must be a direct user-facing response summarizing what was done or why no change was made. '
                     'When setting "assignee", use only names from the provided team member list. '
                     "If the request is unclear, set no mutations and ask for clarification in reply."
@@ -1817,7 +1967,7 @@ async def send_chat_message(
                     f"Team members (valid assignees): {member_summary}\n"
                     f"Whiteboard: {whiteboard_summary}\n"
                     f"Whiteboard image context: {whiteboard_image_hint}\n"
-                    f"Roadmap text selection: {roadmap_selection}\n"
+                    f"Project README text selection: {roadmap_selection}\n"
                     f"Tasks:\n{tasks_summary}\n"
                     f"Roadmap:\n{roadmap_content}\n"
                     f"---------------\n"
@@ -1907,12 +2057,8 @@ async def send_chat_message(
                         "Board-action response was not valid JSON. malformed_output=%s",
                         malformed_output_debug,
                     )
-                    ai_reply = (
-                        _build_ai_operation_failure_message(
-                            "AI response was not valid JSON"
-                        )
-                        + "\nMalformed AI output:\n"
-                        + malformed_output_debug
+                    ai_reply = _build_ai_operation_failure_message(
+                        "AI response was not valid JSON"
                     )
                 else:
                     raw_tasks = result.get("tasks", [])
@@ -1929,6 +2075,14 @@ async def send_chat_message(
                     else:
                         roadmap_payload = None
                         operation_issues.append('field "roadmap" must be an object or null')
+                    if roadmap_payload is not None:
+                        if (
+                            "project_readme" not in roadmap_payload
+                            and isinstance(roadmap_payload.get("vision"), str)
+                        ):
+                            roadmap_payload["project_readme"] = roadmap_payload.get(
+                                "vision"
+                            )
 
                     member_names_for_assignment = [
                         str(member.get("name", "")).strip()

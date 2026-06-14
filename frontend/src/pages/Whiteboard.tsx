@@ -159,9 +159,12 @@ export default function WhiteboardPage({
 
   const fetchChatModels = useCallback(async () => {
     try {
-      const data = await apiFetch<{ models?: string[]; default_model?: string }>(`/api/chat/models`, {
-        headers: getAiHeaders(),
-      });
+      const data = await apiFetch<{ models?: string[]; default_model?: string }>(
+        `/api/chat/models?room_id=${encodeURIComponent(roomCode)}`,
+        {
+          headers: getAiHeaders(),
+        },
+      );
       const modelNames = (data.models || []).filter((modelName) => modelName.trim().length > 0);
       if (modelNames.length === 0) return;
       const options = modelNames.map((modelName) => ({
